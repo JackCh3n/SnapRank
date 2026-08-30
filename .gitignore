@@ -1,0 +1,22 @@
+# Build
+*.exe
+*.exe~
+build/bin/
+dist/
+
+# Runtime
+work/
+archive/
+*.db
+*.log
+logs/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
