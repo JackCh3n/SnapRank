@@ -1,0 +1,17 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "SnapRank",
+  "outputfilename": "SnapRank",
+  "frontend:install": "npm",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "SnapRank"
+  },
+  "info": {
+    "productName": "帧选 SnapRank",
+    "productVersion": "1.2.0",
+    "comments": "本地 AI 照片评分归档"
+  }
+}
