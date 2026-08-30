@@ -1,5 +1,6 @@
 # Build
 *.exe
+!third_party/**/*.exe
 *.exe~
 build/bin/
 
