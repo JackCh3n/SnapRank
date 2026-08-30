@@ -58,8 +58,8 @@ main:
           script: |
             set -e
             export GOPROXY=https://goproxy.cn,direct
-            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
-              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || { echo "upstream clone unavailable, using committed snapshot"; mkdir -p ../ddGoose-go && cp -r third_party/ddgoose-go/. ../ddGoose-go/; }
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         # 构建前端（Vite 产物输出到 web/dist 并由 go:embed 内嵌）
@@ -163,8 +163,8 @@ main:
           script: |
             set -e
             export GOPROXY=https://goproxy.cn,direct
-            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
-              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || { echo "upstream clone unavailable, using committed snapshot"; mkdir -p ../ddGoose-go && cp -r third_party/ddgoose-go/. ../ddGoose-go/; }
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         - name: build-frontend
@@ -245,8 +245,8 @@ main:
           script: |
             set -e
             export GOPROXY=https://goproxy.cn,direct
-            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
-              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || { echo "upstream clone unavailable, using committed snapshot"; mkdir -p ../ddGoose-go && cp -r third_party/ddgoose-go/. ../ddGoose-go/; }
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         - name: build-frontend
@@ -320,8 +320,8 @@ main:
           script: |
             set -e
             export GOPROXY=https://goproxy.cn,direct
-            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
-              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || { echo "upstream clone unavailable, using committed snapshot"; mkdir -p ../ddGoose-go && cp -r third_party/ddgoose-go/. ../ddGoose-go/; }
         - name: vet-and-compile
           script: |
             set -e

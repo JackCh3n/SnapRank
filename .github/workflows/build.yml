@@ -34,14 +34,20 @@ jobs:
           path: snaprank
 
       # 压缩引擎依赖：go.mod 中 replace ddgoose-go => ../ddGoose-go，
-      # 克隆到兄弟目录即可满足；lib/ 压缩引擎随产物一起打包分发。
-      # JackCh3n/ddGoose-go 为私有仓库，默认 GITHUB_TOKEN 无跨仓库权限，
-      # 故走 cnb.cool 匿名克隆（若已改为公开仓库可换回 actions/checkout）。
-      - name: Checkout ddGoose-go (compression engine dependency)
+      # 准备到兄弟目录即可满足；lib/ 压缩引擎随产物一起打包分发。
+      # JackCh3n/ddGoose-go 为私有仓库（默认 GITHUB_TOKEN 无跨仓库权限），
+      # 优先从 cnb.cool 匿名克隆（禁用凭据管理器避免无头环境认证挂起），
+      # 失败时回退到仓库内置快照 third_party/ddgoose-go（保证确定性构建）。
+      - name: Prepare ddGoose-go (compression engine dependency)
         shell: bash
         run: |
-          git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ddGoose-go \
-            || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ddGoose-go
+          if git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ddGoose-go 2>&1; then
+            echo "using full upstream clone"
+          else
+            echo "upstream clone unavailable, using committed snapshot"
+            mkdir -p ddGoose-go
+            cp -r snaprank/third_party/ddgoose-go/. ddGoose-go/
+          fi
           ls ddGoose-go/lib/cjpeg-mod.exe
 
       - name: Setup Go 1.22
