@@ -20,3 +20,6 @@ web/dist/assets/
 Thumbs.db
 .idea/
 .vscode/
+
+# CI artifacts
+dist/

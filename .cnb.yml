@@ -1,0 +1,331 @@
+# =============================================================================
+# 帧选 SnapRank · CNB 云原生构建流水线
+#
+# 与 .github/workflows/build.yml（GitHub Actions）行为对齐：
+#   - 推送到 main：构建前端（Vite）→ Windows amd64 交叉编译
+#     → 打包 zip（exe + DD鹅 lib 压缩引擎）→ 生成日期版本号（v{YYYY_MMDD}）
+#     → 创建 Release → 上传附件
+#   - 推送 tag（如 git tag v2026_0830）：正式发版，版本号取 Tag 名
+#   - web_trigger 手动触发：与 main 推送相同流程
+#   - PR 事件：Windows 交叉编译 + go vet 质量门禁
+#
+# 说明：项目依赖本地模块 ddgoose-go（go.mod replace ../ddGoose-go，其中
+# ddgoose-go/ui 使用了 Windows 专用的 syscall 字段），因此采用 DD鹅 同款
+# Windows 专用流水线：Linux 容器交叉编译 GOOS=windows（纯 Go 无 CGO，
+# 无需 mingw），测试（go test 需运行测试二进制）由 GitHub Actions 的
+# windows-latest 原生执行；压缩引擎依赖在流水线内克隆兄弟目录满足 replace。
+# =============================================================================
+
+# ── 公共构建环境（YAML 锚点复用） ──────────────────────────────────────────
+.build-env: &build-env
+  runner:
+    cpus: 8
+  docker:
+    build:
+      dockerfile: .cnb/Dockerfile   # Go 1.22 + Node 18（前端构建）+ zip
+      by:
+        - go.mod
+        - go.sum
+
+# ── 推送到 main：构建 + 发布 Release ───────────────────────────────────────
+main:
+  push:
+    - name: build-and-release
+      <<: *build-env
+      ifModify:
+        - "*.go"
+        - "go.mod"
+        - "go.sum"
+        - ".cnb.yml"
+        - ".cnb/**"
+        - ".github/**"
+        - "frontend/**"
+        - "web/**"
+      stages:
+        # 生成发布版本号（日期，只到日，与 GitHub Actions 的 v{YYYY_MMDD} 一致）
+        - name: set-version
+          script: |
+            export TZ=Asia/Shanghai
+            VERSION="v$(date +%Y_%m%d)"
+            echo "==> 构建版本: $VERSION"
+            echo "##[set-output VERSION=${VERSION}]"
+          exports:
+            VERSION: RELEASE_VERSION
+
+        # 压缩引擎依赖：克隆 DD鹅 到兄弟目录满足 go.mod 的 replace ../ddGoose-go
+        # （其 lib/ 压缩引擎随产物一起打包；cnb 源失败时回退 github 源）
+        - name: prepare-deps
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            ls ../ddGoose-go/lib/cjpeg-mod.exe
+
+        # 构建前端（Vite 产物输出到 web/dist 并由 go:embed 内嵌）
+        - name: build-frontend
+          script: |
+            set -e
+            cd frontend
+            npm ci --registry=https://registry.npmmirror.com
+            npm run build
+
+        # 质量门禁：Linux 容器无法运行 Windows 测试二进制，做交叉编译 + vet 检查
+        # （go test 由 GitHub Actions 的 windows-latest 原生执行）
+        - name: vet-and-compile
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+            echo "交叉编译与 vet 检查通过"
+
+        # 构建 Windows amd64 主程序（内嵌前端，纯 Go 无 CGO）
+        - name: build-windows
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            export TZ=Asia/Shanghai
+            mkdir -p dist
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.buildVersion=$RELEASE_VERSION" \
+              -o dist/SnapRank.exe .
+            # 打包：exe + DD鹅 lib 压缩引擎 + README（lib 需与 exe 同级）
+            mkdir -p dist/lib
+            cp ../ddGoose-go/lib/* dist/lib/
+            cp README.md dist/
+            (cd dist && zip -r SnapRank-windows-amd64.zip SnapRank.exe lib README.md)
+            rm -rf dist/lib dist/SnapRank.exe dist/README.md
+            ls -lh dist/
+
+        # 生成 Release 描述
+        - name: gen-release-notes
+          script: |
+            cat > RELEASE_NOTES.md <<EOF
+            ## 帧选 SnapRank $RELEASE_VERSION
+
+            > 由 CNB 云原生构建在推送 main 时自动生成（与 GitHub Actions 构建流程一致）
+
+            ### 内容
+
+            | 文件 | 说明 |
+            |------|------|
+            | SnapRank-windows-amd64.zip | 主程序（内嵌前端）+ DD鹅 lib 压缩引擎 + README |
+
+            ### 使用方式
+
+            1. 解压 zip，直接运行 SnapRank.exe（浏览器打开 http://127.0.0.1:8787）
+            2. 设置页填入基元律动 API Key（或切换 mock 模式离线体验）
+            3. 选择照片目录 → 开始评分 → 复核归档
+            EOF
+            cat RELEASE_NOTES.md
+
+        # 创建 Release（同日多次推送更新同一 Release）
+        - name: create-release
+          type: git:release
+          options:
+            tag: $RELEASE_VERSION
+            title: SnapRank $RELEASE_VERSION
+            descriptionFromFile: RELEASE_NOTES.md
+            latest: true
+          exports:
+            version: RELEASE_VERSION
+
+        # 上传打包产物为 Release 附件
+        - name: upload-attachments
+          image: cnbcool/attachments:latest
+          settings:
+            tag: $RELEASE_VERSION
+            attachments:
+              - "./dist/*"
+      endStages:
+        - name: summary
+          script: |
+            echo "Build $CNB_BUILD_ID finished"
+            echo "Release version: ${RELEASE_VERSION:-<none>}"
+            ls -lh dist/ || true
+
+# ── Tag 推送：正式发版（版本号取 Tag 名） ──────────────────────────────────
+"$":
+  tag_push:
+    - name: release-build
+      <<: *build-env
+      stages:
+        - name: set-version
+          script: |
+            VERSION="$CNB_BRANCH"
+            echo "==> 发版版本: $VERSION"
+            echo "##[set-output VERSION=$VERSION]"
+          exports:
+            VERSION: RELEASE_VERSION
+
+        - name: prepare-deps
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            ls ../ddGoose-go/lib/cjpeg-mod.exe
+
+        - name: build-frontend
+          script: |
+            set -e
+            cd frontend
+            npm ci --registry=https://registry.npmmirror.com
+            npm run build
+
+        - name: vet-and-compile
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+            echo "交叉编译与 vet 检查通过"
+
+        - name: build-windows
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            mkdir -p dist
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.buildVersion=$RELEASE_VERSION" \
+              -o dist/SnapRank.exe .
+            mkdir -p dist/lib
+            cp ../ddGoose-go/lib/* dist/lib/
+            cp README.md dist/
+            (cd dist && zip -r SnapRank-windows-amd64.zip SnapRank.exe lib README.md)
+            rm -rf dist/lib dist/SnapRank.exe dist/README.md
+            ls -lh dist/
+
+        - name: gen-release-notes
+          script: |
+            cat > RELEASE_NOTES.md <<EOF
+            ## 帧选 SnapRank $RELEASE_VERSION
+
+            > 由 CNB 云原生构建在 Tag 推送时正式发布
+            EOF
+            cat RELEASE_NOTES.md
+
+        - name: create-release
+          type: git:release
+          options:
+            tag: $RELEASE_VERSION
+            title: SnapRank $RELEASE_VERSION
+            descriptionFromFile: RELEASE_NOTES.md
+            latest: true
+
+        - name: upload-attachments
+          image: cnbcool/attachments:latest
+          settings:
+            tag: $RELEASE_VERSION
+            attachments:
+              - "./dist/*"
+      endStages:
+        - name: summary
+          script: |
+            echo "Build $CNB_BUILD_ID finished"
+            echo "Release version: ${RELEASE_VERSION:-<none>}"
+            ls -lh dist/ || true
+
+  # ── 手动触发：与 main 推送相同流程 ──────────────────────────────────────
+  web_trigger:
+    - name: manual-release
+      <<: *build-env
+      stages:
+        - name: set-version
+          script: |
+            export TZ=Asia/Shanghai
+            VERSION="v$(date +%Y_%m%d)"
+            echo "==> 构建版本: $VERSION"
+            echo "##[set-output VERSION=${VERSION}]"
+          exports:
+            VERSION: RELEASE_VERSION
+
+        - name: prepare-deps
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+            ls ../ddGoose-go/lib/cjpeg-mod.exe
+
+        - name: build-frontend
+          script: |
+            set -e
+            cd frontend
+            npm ci --registry=https://registry.npmmirror.com
+            npm run build
+
+        - name: vet-and-compile
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+            echo "交叉编译与 vet 检查通过"
+
+        - name: build-windows
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            export TZ=Asia/Shanghai
+            mkdir -p dist
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.buildVersion=$RELEASE_VERSION" \
+              -o dist/SnapRank.exe .
+            mkdir -p dist/lib
+            cp ../ddGoose-go/lib/* dist/lib/
+            cp README.md dist/
+            (cd dist && zip -r SnapRank-windows-amd64.zip SnapRank.exe lib README.md)
+            rm -rf dist/lib dist/SnapRank.exe dist/README.md
+            ls -lh dist/
+
+        - name: gen-release-notes
+          script: |
+            cat > RELEASE_NOTES.md <<EOF
+            ## 帧选 SnapRank $RELEASE_VERSION
+
+            > 由 CNB 云原生构建手动触发生成
+            EOF
+            cat RELEASE_NOTES.md
+
+        - name: create-release
+          type: git:release
+          options:
+            tag: $RELEASE_VERSION
+            title: SnapRank $RELEASE_VERSION
+            descriptionFromFile: RELEASE_NOTES.md
+            latest: true
+
+        - name: upload-attachments
+          image: cnbcool/attachments:latest
+          settings:
+            tag: $RELEASE_VERSION
+            attachments:
+              - "./dist/*"
+      endStages:
+        - name: summary
+          script: |
+            echo "Build $CNB_BUILD_ID finished"
+            echo "Release version: ${RELEASE_VERSION:-<none>}"
+            ls -lh dist/ || true
+
+# ── PR：质量门禁（交叉编译 + vet；测试由 GitHub Actions 原生执行） ─────────
+"**":
+  pull_request:
+    - name: pr-check
+      <<: *build-env
+      stages:
+        - name: prepare-deps
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
+              || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ../ddGoose-go
+        - name: vet-and-compile
+          script: |
+            set -e
+            export GOPROXY=https://goproxy.cn,direct
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+            GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+            echo "PR 检查通过"

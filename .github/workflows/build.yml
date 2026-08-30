@@ -1,0 +1,164 @@
+# =============================================================================
+# SnapRank · GitHub Actions 构建流水线
+#
+# 与 .cnb.yml（CNB 云原生构建）行为对齐：
+#   - 推送到 main/master：测试 → 构建前端（Vite）→ 构建 Windows amd64
+#     → 打包 zip（exe + DD鹅 lib 压缩引擎）→ 生成日期版本号（v{YYYY_MMDD}）
+#     → 创建 Release → 上传附件
+#   - workflow_dispatch 手动触发：与 main 推送相同流程
+#   - PR 事件：跑构建 + go vet + go test 做质量门禁（不发布）
+#
+# 说明：项目依赖本地模块 ddgoose-go（go.mod replace ../ddGoose-go，其中
+# ddgoose-go/ui 使用了 Windows 专用的 syscall 字段），因此只构建 Windows amd64，
+# 并把 JackCh3n/ddGoose-go 检出到兄弟目录满足 replace，其 lib/ 随包分发。
+# =============================================================================
+
+name: Build Release
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build windows-amd64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout SnapRank
+        uses: actions/checkout@v4
+        with:
+          path: snaprank
+
+      # 压缩引擎依赖：go.mod 中 replace ddgoose-go => ../ddGoose-go，
+      # 检出到兄弟目录即可满足；lib/ 压缩引擎随产物一起打包分发
+      - name: Checkout ddGoose-go (compression engine dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: JackCh3n/ddGoose-go
+          ref: main
+          path: ddGoose-go
+
+      - name: Setup Go 1.22
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: false
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend (Vite)
+        working-directory: snaprank/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Vet
+        working-directory: snaprank
+        run: go vet ./...
+
+      - name: Test
+        working-directory: snaprank
+        run: go test ./...
+
+      - name: Get build timestamp
+        id: timestamp
+        shell: bash
+        run: |
+          TIMESTAMP=$(date +"%Y_%m%d")
+          echo "value=v${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        working-directory: snaprank
+        shell: bash
+        run: |
+          go build -trimpath -ldflags "-s -w -X main.buildVersion=${{ steps.timestamp.outputs.value }}" -o SnapRank.exe .
+          echo "Built: SnapRank.exe"
+          ls -lh SnapRank.exe
+
+      - name: Package (exe + DD鹅 lib + README)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg/lib | Out-Null
+          Copy-Item snaprank/SnapRank.exe pkg/
+          Copy-Item ddGoose-go/lib/* pkg/lib/
+          Copy-Item snaprank/README.md pkg/
+          Compress-Archive -Path pkg/* -DestinationPath SnapRank-windows-amd64.zip -Force
+          Get-ChildItem SnapRank-windows-amd64.zip | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnapRank-windows-amd64
+          path: SnapRank-windows-amd64.zip
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get build timestamp
+        id: timestamp
+        run: |
+          TIMESTAMP=$(date +"%Y_%m%d")
+          echo "value=v${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: SnapRank-windows-amd64
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -name '*.zip' -exec cp {} release/ \;
+          echo "=== Release assets ==="
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.timestamp.outputs.value }}
+          name: SnapRank ${{ steps.timestamp.outputs.value }}
+          files: release/*
+          # 版本号只到日 v{YYYY_MMDD}：同一天多次 push 时更新同一 Release，
+          # 避免同名 tag 已存在导致创建失败（与 CNB git:release 行为对齐）。
+          allow_update: true
+          body: |
+            ## 帧选 SnapRank ${{ steps.timestamp.outputs.value }}
+
+            > 由 GitHub Actions 在推送 main 时自动生成（与 CNB 云原生构建流程一致）
+
+            ### 内容
+
+            | 文件 | 说明 |
+            |------|------|
+            | SnapRank-windows-amd64.zip | 主程序（内嵌前端）+ DD鹅 lib 压缩引擎 + README |
+
+            ### 使用方式
+
+            1. 解压 zip，双击 `build.bat` 或直接运行 `SnapRank.exe`（浏览器打开 http://127.0.0.1:8787）
+            2. 设置页填入基元律动 API Key（或切换 mock 模式离线体验）
+            3. 选择照片目录 → 开始评分 → 复核归档
+
+            ### 说明
+
+            - 压缩引擎（DD鹅/MozJPEG）仅支持 Windows amd64；lib 文件夹需与 SnapRank.exe 同级
+            - 可选 Wails 桌面壳需本地 `wails build`（-tags desktop）
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

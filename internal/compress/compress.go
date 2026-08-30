@@ -47,15 +47,28 @@ type Engine struct {
 	JPEGQuality int    // DD鹅 MozJPEG 质量
 }
 
-// NewEngine 构造；libDir 为空时回退 exe 同级 lib/，再回退 DD鹅 项目目录
+// NewEngine 构造；libDir 回退链：配置值 → exe 同级 lib\ → DD鹅 项目目录，
+// 全部缺失时报错并提示配置。打包分发时 exe 旁带 lib\ 即可开箱即用。
 func NewEngine(libDir string, maxEdge, quality int) (*Engine, error) {
-	if libDir == "" {
-		libDir = "lib"
+	for _, dir := range libCandidates(libDir) {
+		if libExists(dir) {
+			return &Engine{LibDir: dir, MaxEdge: maxEdge, JPEGQuality: quality}, nil
+		}
 	}
-	if !libExists(libDir) {
-		return nil, fmt.Errorf("DD鹅 lib 工具目录不存在: %s（请在设置中配置 lib_dir）", libDir)
+	return nil, fmt.Errorf("DD鹅 lib 工具目录不存在（尝试: %s）；请在设置中配置 lib_dir，或把 lib 文件夹放到 exe 同级", libDir)
+}
+
+// libCandidates 按优先级返回候选 lib 目录
+func libCandidates(configured string) []string {
+	cands := []string{}
+	if configured != "" {
+		cands = append(cands, configured)
 	}
-	return &Engine{LibDir: libDir, MaxEdge: maxEdge, JPEGQuality: quality}, nil
+	if exe, err := os.Executable(); err == nil {
+		cands = append(cands, filepath.Join(filepath.Dir(exe), "lib"))
+	}
+	cands = append(cands, filepath.Join("..", "ddGoose-go", "lib"), `D:\wwwroot\wwwroot\ddGoose-go\lib`)
+	return cands
 }
 
 func libExists(dir string) bool {

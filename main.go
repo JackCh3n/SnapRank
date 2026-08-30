@@ -27,6 +27,16 @@ import (
 	"snaprank/server"
 )
 
+// buildVersion 由 CI 通过 -ldflags "-X main.buildVersion=v2026_0830" 注入；
+// 为空时使用 server.Version 的内置默认值。
+var buildVersion = ""
+
+func init() {
+	if buildVersion != "" {
+		server.Version = buildVersion
+	}
+}
+
 func main() {
 	args := os.Args[1:]
 	// desktop 构建（wails build）下无参数启动即打开桌面窗口
