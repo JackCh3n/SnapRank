@@ -34,13 +34,15 @@ jobs:
           path: snaprank
 
       # 压缩引擎依赖：go.mod 中 replace ddgoose-go => ../ddGoose-go，
-      # 检出到兄弟目录即可满足；lib/ 压缩引擎随产物一起打包分发
+      # 克隆到兄弟目录即可满足；lib/ 压缩引擎随产物一起打包分发。
+      # JackCh3n/ddGoose-go 为私有仓库，默认 GITHUB_TOKEN 无跨仓库权限，
+      # 故走 cnb.cool 匿名克隆（若已改为公开仓库可换回 actions/checkout）。
       - name: Checkout ddGoose-go (compression engine dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: JackCh3n/ddGoose-go
-          ref: main
-          path: ddGoose-go
+        shell: bash
+        run: |
+          git clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ddGoose-go \
+            || git clone --depth 1 https://github.com/JackCh3n/ddGoose-go.git ddGoose-go
+          ls ddGoose-go/lib/cjpeg-mod.exe
 
       - name: Setup Go 1.22
         uses: actions/setup-go@v5
