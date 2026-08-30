@@ -187,7 +187,7 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 	x := h.Sum64()
 
 	pick := func(base, spread float64, salt uint64) float64 {
-		v := float64((x>>salt)%100)/100.0 // 0~1
+		v := float64((x>>salt)%100) / 100.0 // 0~1
 		return base + v*spread
 	}
 	dims := map[string]float64{
@@ -197,8 +197,8 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 		"color":       math.Min(10, pick(4.5, 5.0, 24)),
 	}
 	b, _ := json.Marshal(map[string]interface{}{
-		"dims":  dims,
-		"tags":  mockTags(x),
+		"dims": dims,
+		"tags": mockTags(x),
 		"reasons": map[string]string{
 			"strength": "（mock）画面整体完整，主体明确",
 			"weakness": "（mock）为离线演示生成的确定性评分",

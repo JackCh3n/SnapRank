@@ -42,8 +42,8 @@ func BuildPrompt() string {
 
 // rawDims 模型输出结构
 type rawDims struct {
-	Dims map[string]float64 `json:"dims"`
-	Tags []string           `json:"tags"`
+	Dims    map[string]float64 `json:"dims"`
+	Tags    []string           `json:"tags"`
 	Reasons struct {
 		Strength string `json:"strength"`
 		Weakness string `json:"weakness"`

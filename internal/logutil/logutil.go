@@ -12,11 +12,11 @@ import (
 )
 
 var (
-	mu      sync.Mutex
-	file    *os.File
-	logDir  string
-	keep    = 7
-	dayKey  string
+	mu       sync.Mutex
+	file     *os.File
+	logDir   string
+	keep     = 7
+	dayKey   string
 	toStderr = true
 )
 

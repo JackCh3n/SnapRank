@@ -14,6 +14,8 @@ export const state = reactive({
   progress: [],               // 最近评分进度（{file, score, status, error}）
   stage: null,                // {stage, total}
   scan: null,                 // {count, est_cost, items}
+  dir: '',                    // 运行页输入的源图目录（跨页面保留）
+  selModel: '',               // 运行页选中的模型（跨页面保留）
   toast: null,
 })
 

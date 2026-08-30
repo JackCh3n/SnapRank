@@ -105,9 +105,9 @@ func (b *Bus) Publish(ev Event) {
 // StartOpts 启动参数
 type StartOpts struct {
 	Dir      string `json:"dir"`
-	Model    string `json:"model"`      // 为空取配置默认
-	SampleN  int    `json:"sample_n"`   // 抽样试跑数量，0=全量
-	ForceNew bool   `json:"force_new"`  // 强制新建会话（不续跑）
+	Model    string `json:"model"`     // 为空取配置默认
+	SampleN  int    `json:"sample_n"`  // 抽样试跑数量，0=全量
+	ForceNew bool   `json:"force_new"` // 强制新建会话（不续跑）
 }
 
 // Engine 流水线引擎
@@ -175,7 +175,7 @@ func (e *Engine) Scan(dir string) ([]*ScanItem, float64, error) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(info.Name()))
-		if !compress.SupportedExts[ext] {
+		if !compress.SupportedExts[ext] && !compress.UnsupportedExts[ext] {
 			return nil
 		}
 		if strings.HasPrefix(info.Name(), "~$") || strings.HasSuffix(info.Name(), ".tmp") {
@@ -204,7 +204,7 @@ func (e *Engine) Scan(dir string) ([]*ScanItem, float64, error) {
 		}
 	}
 	model := cfg.Model.Default
-	return items, e.estCost(model)*float64(live), nil
+	return items, e.estCost(model) * float64(live), nil
 }
 
 // estCost 单张预估费用（元）；mock 或未知价格为 0
@@ -291,12 +291,14 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 		status := store.StatusPending
 		if it.Dup {
 			status = store.StatusDuplicate
+		} else if compress.UnsupportedExts[strings.ToLower(filepath.Ext(it.Path))] {
+			status = store.StatusUnsupported // HEIC/RAW：登记但不支持
 		}
 		id, err := e.store.UpsertPhoto(&store.Photo{
 			SessionID: sessID, Fingerprint: it.FP, SrcPath: it.Path,
 			Filename: it.Filename, RelPath: relPath(opts.Dir, it.Path), Size: it.Size, Status: status,
 		})
-		if err == nil && !it.Dup {
+		if err == nil && status == store.StatusPending {
 			e.resetIfChanged(id, it.FP)
 		}
 	}
@@ -607,17 +609,27 @@ func (e *Engine) Archive(mode archive.Mode) (*ArchiveSummary, error) {
 			sum.Skipped++
 			continue
 		}
-		// parse_fail：不伪造分数也不动文件，仅记录进待复检报告
+		// parse_fail：不伪造分数；复制到待复检目录便于人工检查
 		if p.Status == store.StatusParseFail {
+			dest, skipped, perr := archive.Place(sessionDir, bucket, p.SrcPath, p.Fingerprint, mode)
+			if perr != nil {
+				sum.Failed++
+				sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", p.Filename, perr))
+				rows = append(rows, toRow(p, bucket))
+				continue
+			}
+			if skipped {
+				sum.Skipped++
+			} else {
+				sum.Placed++
+			}
 			sum.Buckets[bucket]++
+			e.store.SetPhotoArchived(p.ID, dest)
 			rows = append(rows, toRow(p, bucket))
 			continue
 		}
-		src := p.CompressedPath
-		if _, serr := os.Stat(src); serr != nil {
-			src = p.SrcPath // 无压缩图时归档源图
-		}
-		dest, skipped, err := archive.Place(sessionDir, bucket, src, p.Fingerprint, mode)
+		// 归档对象为源图（压缩图仅用于评分与预览）
+		dest, skipped, err := archive.Place(sessionDir, bucket, p.SrcPath, p.Fingerprint, mode)
 		if err != nil {
 			sum.Failed++
 			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", p.Filename, err))
@@ -696,7 +708,8 @@ func (e *Engine) GetSummary() (*Summary, error) {
 		}
 		if p.ArchivedPath != "" {
 			sum.Archived = true
-			sum.ArchiveDir = filepath.Dir(p.ArchivedPath)
+			// 归档根目录 = 会话批次目录
+			sum.ArchiveDir = filepath.Join(cfg.Paths.ArchiveRoot, sess.ID)
 		}
 		bucket := scorer.BucketOf(p.Score, p.Status == store.StatusParseFail, cfg.Score.Thresholds, p.OverrideBucket)
 		sum.Buckets[bucket]++

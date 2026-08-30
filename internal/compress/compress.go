@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"snaprank/internal/exiforient"
 	"snaprank/internal/fp"
+	"snaprank/internal/logutil"
 )
 
 // SupportedExts 支持解码的扩展名
@@ -32,11 +34,17 @@ var SupportedExts = map[string]bool{
 	".gif": true, ".bmp": true, ".tif": true, ".tiff": true,
 }
 
+// UnsupportedExts 扫描时登记但不支持的格式（HEIC/RAW），明细中标记 unsupported
+var UnsupportedExts = map[string]bool{
+	".heic": true, ".heif": true, ".cr2": true, ".cr3": true, ".nef": true,
+	".arw": true, ".dng": true, ".orf": true, ".rw2": true, ".raf": true,
+}
+
 // Engine 压缩引擎
 type Engine struct {
-	LibDir     string // DD鹅 lib 工具目录
-	MaxEdge    int    // 压缩图最长边
-	JPEGQuality int   // DD鹅 MozJPEG 质量
+	LibDir      string // DD鹅 lib 工具目录
+	MaxEdge     int    // 压缩图最长边
+	JPEGQuality int    // DD鹅 MozJPEG 质量
 }
 
 // NewEngine 构造；libDir 为空时回退 exe 同级 lib/，再回退 DD鹅 项目目录
@@ -62,6 +70,7 @@ func CacheName(fingerprint string) string {
 
 // ToCache 将源图压缩并输出到 cacheDir/<指纹>.jpg，返回压缩图路径。
 // 已存在同指纹缓存时直接命中跳过（断点续跑）。
+// 流程：① 直通拷贝（无需重编码时）或预处理到临时文件 → ② DD鹅 原地压缩 → ③ 落缓存。
 func (e *Engine) ToCache(srcPath, fingerprint, cacheDir string) (string, error) {
 	dst := filepath.Join(cacheDir, CacheName(fingerprint))
 	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
@@ -71,60 +80,53 @@ func (e *Engine) ToCache(srcPath, fingerprint, cacheDir string) (string, error) 
 		return "", err
 	}
 
-	tmpName := ".tmp_" + CacheName(fingerprint)
-	tmpPath := filepath.Join(cacheDir, tmpName)
+	tmpPath := filepath.Join(cacheDir, ".tmp_"+CacheName(fingerprint))
 	defer os.Remove(tmpPath)
+	defer os.Remove(tmpPath + ".tmp") // DD鹅 原地模式的中间产物
 
-	passDirect := false
+	// ① 准备临时文件：无需重编码的 JPEG 直通拷贝，其余预处理（EXIF/缩边/转 JPEG）
+	needPreprocess := true
 	if isJPEG(srcPath) {
-		// 小图且无旋转：跳过解码直接交给 DD鹅（省时省内存）
-		if ori := readOrientation(srcPath); ori == 1 {
-			if cfg, _, err := image.DecodeConfig(openFile(srcPath)); err == nil {
-				long := cfg.Width
-				if cfg.Height > long {
-					long = cfg.Height
-				}
-				passDirect = long <= e.MaxEdge
-			}
+		cfg, _, err := image.DecodeConfig(openFile(srcPath))
+		if err != nil {
+			return "", fmt.Errorf("解码失败（损坏或不受支持）: %w", err)
 		}
+		long := cfg.Width
+		if cfg.Height > long {
+			long = cfg.Height
+		}
+		needPreprocess = long > e.MaxEdge || readOrientation(srcPath) != 1
 	}
-
-	var err error
-	if passDirect {
-		err = e.ddgooseCompress(srcPath, tmpPath)
-	} else {
-		err = e.preprocess(srcPath, tmpPath)
-	}
-	if err != nil {
-		// MozJPEG 对个别 JPEG 也会失败，回退到纯 Go 重编码
-		if passDirect {
-			os.Remove(tmpPath)
-			if err2 := e.preprocess(srcPath, tmpPath); err2 != nil {
-				return "", err2
-			}
-		} else {
+	if needPreprocess {
+		if err := e.preprocess(srcPath, tmpPath); err != nil {
 			return "", err
 		}
+	} else if err := copyFile(srcPath, tmpPath); err != nil {
+		return "", err
 	}
 
-	// 压缩产物反而比原图更大时（罕见），仍使用重编码产物保证格式统一
+	// ② DD鹅（MozJPEG）原地压缩临时文件；失败或未变小时保留预处理产物（不视为错误）
+	if err := e.ddgooseCompress(tmpPath); err != nil {
+		logutil.Info("DD鹅 压缩回退为预处理产物 %s: %v", filepath.Base(srcPath), err)
+	}
+
+	// ③ 落缓存
 	if err := os.Rename(tmpPath, dst); err != nil {
 		return "", err
 	}
 	return dst, nil
 }
 
-// ddgooseCompress 调用 DD鹅（OutputCustom 指定输出目录，文件名保持不变）
-func (e *Engine) ddgooseCompress(src, tmpWithFinalName string) error {
+// ddgooseCompress 调用 DD鹅（MozJPEG）对临时文件原地压缩
+func (e *Engine) ddgooseCompress(path string) error {
 	opts := ui.DefaultOptions()
-	opts.OutputMode = ui.OutputCustom
-	opts.OutputDir = filepath.Dir(tmpWithFinalName)
+	opts.OutputMode = ui.OutputReplace // 原地：内部经 .tmp 中转后替换
 	opts.Format = ui.FormatOriginal
 	opts.JpegQuality = e.JPEGQuality
 	opts.WriteMarker = false // 缓存图不写魔数标记
 	opts.Threads = 1         // 并发由流水线控制
 	c := ui.NewCompressor(e.LibDir, opts)
-	_, err := c.Compress(src)
+	_, err := c.Compress(path)
 	return err
 }
 
@@ -177,6 +179,24 @@ func (e *Engine) LoadThumb(compressedPath string, thumbEdge int) (image.Image, e
 
 func isJPEG(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".jpg") || strings.EqualFold(filepath.Ext(path), ".jpeg")
+}
+
+// copyFile 直通拷贝（无需重编码时保留原始字节）
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func openFile(p string) *os.File {

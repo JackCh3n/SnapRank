@@ -129,4 +129,3 @@ func (a *App) GetState() map[string]interface{} {
 
 // 类型别名（避免 bind 包直接暴露 core.SaveConfigRequest 的 import 差异）
 type core_SaveConfigRequest = core.SaveConfigRequest
-

@@ -5,7 +5,7 @@
       <div class="row">
         <label class="field grow">
           源图目录（递归扫描，支持 jpg/png/webp/gif/bmp/tiff）
-          <input v-model="dir" placeholder="例如 D:\\Photos\\2026-08" @keyup.enter="doScan" />
+          <input v-model="state.dir" placeholder="例如 D:\\Photos\\2026-08" @keyup.enter="doScan" />
         </label>
         <button class="btn plain" :disabled="state.running" @click="doScan">扫描</button>
       </div>
@@ -24,21 +24,21 @@
       <div class="row">
         <label class="field grow">
           视觉模型（在线拉取）
-          <select v-model="model">
+          <select v-model="state.selModel">
             <option v-for="m in state.models.vision" :key="m" :value="m">{{ m }}</option>
-            <option v-if="!state.models.vision.includes(model) && model" :value="model">{{ model }}（当前）</option>
+            <option v-if="!state.models.vision.includes(state.selModel) && state.selModel" :value="state.selModel">{{ state.selModel }}（当前）</option>
           </select>
         </label>
         <button class="btn plain" :disabled="loadingModels" @click="loadModels">
           {{ loadingModels ? '拉取中…' : '刷新模型列表' }}
         </button>
-        <button class="btn" :disabled="state.running || !dir" @click="doStart(true)">▶ 抽样试跑 10 张</button>
-        <button class="btn" :disabled="state.running || !dir" @click="doStart(false)">▶ 开始评分</button>
+        <button class="btn" :disabled="state.running || !state.dir" @click="doStart(true)">▶ 抽样试跑 10 张</button>
+        <button class="btn" :disabled="state.running || !state.dir" @click="doStart(false)">▶ 开始评分</button>
         <button class="btn danger" :disabled="!state.running" @click="doStop">■ 停止</button>
       </div>
       <div class="muted" style="margin-top: 8px">
         当前模型：<b>{{ state.currentModel || '未设置' }}</b>
-        <span v-if="model && model !== state.currentModel" class="tag">已选择 {{ model }}，下次开始时生效</span>
+        <span v-if="state.selModel && state.selModel !== state.currentModel" class="tag">已选择 {{ state.selModel }}，下次开始时生效</span>
         · 不同模型的分数不可横向比较
       </div>
     </div>
@@ -67,8 +67,6 @@
 import { ref, computed, onMounted } from 'vue'
 import { state, api, toast, refreshState, refreshModels } from '../store.js'
 
-const dir = ref('')
-const model = ref('')
 const loadingModels = ref(false)
 
 const doneCount = computed(() => state.progress.length)
@@ -83,9 +81,9 @@ function statusLabel(s) {
 }
 
 async function doScan() {
-  if (!dir.value) return toast('请先输入目录', true)
+  if (!state.dir) return toast('请先输入目录', true)
   try {
-    const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: dir.value }) })
+    const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir }) })
     const live = r.items.filter((i) => !i.dup).length
     const dupCount = r.items.length - live
     state.scan = { count: r.items.length, live, est_cost: r.est_cost, dupCount }
@@ -100,18 +98,18 @@ async function loadModels() {
   const m = await refreshModels()
   loadingModels.value = false
   if (m.vision.length === 0) toast('未发现视觉模型，可到设置调整识别规则', true)
-  else if (!m.vision.includes(model.value)) model.value = m.vision[0]
+  else if (!m.vision.includes(state.selModel)) state.selModel = m.vision[0]
 }
 
 async function doStart(sample) {
   try {
-    if (model.value && model.value !== state.currentModel) {
-      await api('/api/model', { method: 'POST', body: JSON.stringify({ id: model.value }) })
+    if (state.selModel && state.selModel !== state.currentModel) {
+      await api('/api/model', { method: 'POST', body: JSON.stringify({ id: state.selModel }) })
     }
     state.progress = []
     const r = await api('/api/start', {
       method: 'POST',
-      body: JSON.stringify({ dir: dir.value, sample_n: sample ? 10 : 0 }),
+      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0 }),
     })
     state.session = r.session_id
     state.running = true
@@ -131,8 +129,7 @@ async function doStop() {
 
 onMounted(async () => {
   await refreshState()
-  dir.value = state.config && state.config.paths ? '' : ''
-  model.value = state.currentModel
+  if (!state.selModel) state.selModel = state.currentModel
   if (!state.models.vision.length) loadModels()
 })
 </script>

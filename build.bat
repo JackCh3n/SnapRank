@@ -1,38 +1,37 @@
 @echo off
-chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-title SnapRank å¸§é€‰ æ„å»ºè„šæœ¬
+title SnapRank ¹¹½¨½Å±¾
 
 echo ============================================
-echo  å¸§é€‰ SnapRank ä¸€é”®æ„å»º
-echo  æ­¥éª¤ï¼šæ€æ—§è¿›ç¨‹ â†’ æ„å»ºå‰ç«¯/åç«¯ â†’ æ‰“å¼€æµè§ˆå™¨
+echo  Ö¡Ñ¡ SnapRank Ò»¼ü¹¹½¨
+echo  ²½Öè£ºÉ±¾É½ø³Ì - ¹¹½¨Ç°¶Ë/ºó¶Ë - ´ò¿ªä¯ÀÀÆ÷
 echo ============================================
 
-echo [1/4] åœæ­¢æ—§çš„ SnapRank è¿›ç¨‹...
+echo [1/4] Í£Ö¹¾ÉµÄ SnapRank ½ø³Ì...
 taskkill /IM SnapRank.exe /F >nul 2>&1
 timeout /t 1 /nobreak >nul
 
-echo [2/4] æ„å»ºå‰ç«¯ï¼ˆViteï¼‰...
+echo [2/4] ¹¹½¨Ç°¶Ë£¨Vite£©...
 pushd frontend
 call npm run build
 if errorlevel 1 (
     popd
-    echo å‰ç«¯æ„å»ºå¤±è´¥ï¼
+    echo Ç°¶Ë¹¹½¨Ê§°Ü£¡
     pause
     exit /b 1
 )
 popd
 
-echo [3/4] ç¼–è¯‘åç«¯ï¼ˆGoï¼Œå†…åµŒå‰ç«¯ï¼‰...
+echo [3/4] ±àÒëºó¶Ë£¨Go£¬ÄÚÇ¶Ç°¶Ë£©...
 go build -ldflags "-s -w" -o SnapRank.exe .
 if errorlevel 1 (
-    echo åç«¯ç¼–è¯‘å¤±è´¥ï¼
+    echo ºó¶Ë±àÒëÊ§°Ü£¡
     pause
     exit /b 1
 )
 
-echo [4/4] å¯åŠ¨æœåŠ¡å¹¶æ‰“å¼€æµè§ˆå™¨...
+echo [4/4] Æô¶¯·şÎñ²¢´ò¿ªä¯ÀÀÆ÷...
 start "" http://127.0.0.1:8787
 SnapRank.exe serve --port 8787 --no-open
 

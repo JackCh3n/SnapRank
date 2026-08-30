@@ -95,7 +95,7 @@ func parseTIFFOrientation(tiff []byte) (int, error) {
 			return 0, errNotFound
 		}
 		if bo.Uint16(tiff[off:off+2]) == orientTag {
-			return int(bo.Uint16(tiff[off+8:off+10])), nil
+			return int(bo.Uint16(tiff[off+8 : off+10])), nil
 		}
 	}
 	return 0, errNotFound

@@ -44,41 +44,41 @@ type Dims struct {
 
 // Photo 一条照片明细
 type Photo struct {
-	ID            int64    `json:"id"`
-	SessionID     string   `json:"session_id"`
-	Fingerprint   string   `json:"fingerprint"`
-	SrcPath       string   `json:"src_path"`
-	Filename      string   `json:"filename"`
-	RelPath       string   `json:"rel_path"`
-	Size          int64    `json:"size"`
-	Status        string   `json:"status"`
-	Error         string   `json:"error,omitempty"`
-	Score         float64  `json:"score"`
-	Dims          *Dims    `json:"dims,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	Strength      string   `json:"strength,omitempty"`
-	Weakness      string   `json:"weakness,omitempty"`
-	Model         string   `json:"model,omitempty"`
-	PromptVersion string   `json:"prompt_version,omitempty"`
-	Clamped       bool     `json:"clamped,omitempty"`
-	Source        string   `json:"source,omitempty"` // api | cache
-	OverrideBucket string  `json:"override_bucket,omitempty"`
-	ArchivedPath  string   `json:"archived_path,omitempty"`
-	CompressedPath string  `json:"compressed_path,omitempty"`
-	DurationMs    int64    `json:"duration_ms"`
-	UpdatedAt     string   `json:"updated_at"`
+	ID             int64    `json:"id"`
+	SessionID      string   `json:"session_id"`
+	Fingerprint    string   `json:"fingerprint"`
+	SrcPath        string   `json:"src_path"`
+	Filename       string   `json:"filename"`
+	RelPath        string   `json:"rel_path"`
+	Size           int64    `json:"size"`
+	Status         string   `json:"status"`
+	Error          string   `json:"error,omitempty"`
+	Score          float64  `json:"score"`
+	Dims           *Dims    `json:"dims,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Strength       string   `json:"strength,omitempty"`
+	Weakness       string   `json:"weakness,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	PromptVersion  string   `json:"prompt_version,omitempty"`
+	Clamped        bool     `json:"clamped,omitempty"`
+	Source         string   `json:"source,omitempty"` // api | cache
+	OverrideBucket string   `json:"override_bucket,omitempty"`
+	ArchivedPath   string   `json:"archived_path,omitempty"`
+	CompressedPath string   `json:"compressed_path,omitempty"`
+	DurationMs     int64    `json:"duration_ms"`
+	UpdatedAt      string   `json:"updated_at"`
 }
 
 // Session 一次评分会话
 type Session struct {
-	ID            string  `json:"id"`
-	CreatedAt     string  `json:"created_at"`
-	SourceDir     string  `json:"source_dir"`
-	Model         string  `json:"model"`
-	PromptVersion string  `json:"prompt_version"`
-	Status        string  `json:"status"`
-	Total         int     `json:"total"`
-	Done          int     `json:"done"`
+	ID            string `json:"id"`
+	CreatedAt     string `json:"created_at"`
+	SourceDir     string `json:"source_dir"`
+	Model         string `json:"model"`
+	PromptVersion string `json:"prompt_version"`
+	Status        string `json:"status"`
+	Total         int    `json:"total"`
+	Done          int    `json:"done"`
 }
 
 // Store SQLite 存储句柄
@@ -433,10 +433,10 @@ func (s *Store) UpdateScoresLocal(scores map[int64]float64) error {
 
 // CacheEntry 缓存的评分结果
 type CacheEntry struct {
-	Dims      Dims
-	Tags      []string
-	Strength  string
-	Weakness  string
+	Dims     Dims
+	Tags     []string
+	Strength string
+	Weakness string
 }
 
 // CacheGet 命中跨会话评分缓存

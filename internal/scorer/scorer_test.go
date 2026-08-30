@@ -84,7 +84,7 @@ func TestBucketOf(t *testing.T) {
 		{6.9, false, "", "33_一般"},
 		{5.0, false, "", "33_一般"},
 		{4.9, false, "", "30_待清理"},
-		{9.5, true, "", "29_待复检"},     // parse_fail 优先于分数
+		{9.5, true, "", "29_待复检"},      // parse_fail 优先于分数
 		{4.0, false, "35_精选", "35_精选"}, // 手动调档优先
 	}
 	for _, c := range cases {

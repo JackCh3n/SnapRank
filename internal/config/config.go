@@ -11,72 +11,72 @@ import (
 
 // Weights 评分维度权重（总分 = Σ 维度分×权重，本地计算）
 type Weights struct {
-	Technique   float64 `yaml:"technique"`   // 技术质量
-	Composition float64 `yaml:"composition"` // 构图
-	Content     float64 `yaml:"content"`     // 内容与情感
-	Color       float64 `yaml:"color"`       // 色彩
+	Technique   float64 `yaml:"technique" json:"technique"`     // 技术质量
+	Composition float64 `yaml:"composition" json:"composition"` // 构图
+	Content     float64 `yaml:"content" json:"content"`         // 内容与情感
+	Color       float64 `yaml:"color" json:"color"`             // 色彩
 }
 
 // ModelPrice 模型单价（元/百万 tokens），用于成本预估
 type ModelPrice struct {
-	InputPerM  float64 `yaml:"input"`
-	OutputPerM float64 `yaml:"output"`
+	InputPerM  float64 `yaml:"input" json:"input"`
+	OutputPerM float64 `yaml:"output" json:"output"`
 }
 
 // Provider 平台接入配置
 type Provider struct {
-	Type    string `yaml:"type"`     // tokenrhythm(OpenAI兼容) | mock
-	BaseURL string `yaml:"base_url"` // 平台 API 地址
-	APIKey  string `yaml:"api_key"`
+	Type    string `yaml:"type" json:"type"`         // tokenrhythm(OpenAI兼容) | mock
+	BaseURL string `yaml:"base_url" json:"base_url"` // 平台 API 地址
+	APIKey  string `yaml:"api_key" json:"api_key"`
 }
 
 // ModelConfig 模型相关配置
 type ModelConfig struct {
-	Default        string   `yaml:"default"`         // 默认打分模型
-	VisionPatterns []string `yaml:"vision_patterns"` // 视觉模型识别正则（/v1/models 无模态元数据）
+	Default        string   `yaml:"default" json:"default"`                 // 默认打分模型
+	VisionPatterns []string `yaml:"vision_patterns" json:"vision_patterns"` // 视觉模型识别正则（/v1/models 无模态元数据）
 }
 
 // ScoreConfig 评分参数
 type ScoreConfig struct {
-	Temperature float32  `yaml:"temperature"`
-	MaxTokens   int      `yaml:"max_tokens"`
-	TimeoutSec  int      `yaml:"timeout_sec"`
-	Thresholds  []float64 `yaml:"thresholds"` // 分档阈值，降序，默认 [9,7,5]
-	ReuseScores bool     `yaml:"reuse_scores"` // 跨会话指纹缓存复用评分（0 计费）
+	Temperature float32   `yaml:"temperature" json:"temperature"`
+	MaxTokens   int       `yaml:"max_tokens" json:"max_tokens"`
+	TimeoutSec  int       `yaml:"timeout_sec" json:"timeout_sec"`
+	Thresholds  []float64 `yaml:"thresholds" json:"thresholds"`     // 分档阈值，降序，默认 [9,7,5]
+	ReuseScores bool      `yaml:"reuse_scores" json:"reuse_scores"` // 跨会话指纹缓存复用评分（0 计费）
 }
 
 // PipelineConfig 流水线参数
 type PipelineConfig struct {
-	ScoreConcurrency    int `yaml:"score_concurrency"`    // 评分并发
-	CompressConcurrency int `yaml:"compress_concurrency"` // 压缩并发
-	MaxEdge             int `yaml:"max_edge"`             // 压缩图最长边
-	JPEGQuality         int `yaml:"jpeg_quality"`         // DD鹅 MozJPEG 质量
-	MinFileSizeKB       int `yaml:"min_file_size_kb"`     // 小于该体积视为缩略图，跳过
+	ScoreConcurrency    int `yaml:"score_concurrency" json:"score_concurrency"`       // 评分并发
+	CompressConcurrency int `yaml:"compress_concurrency" json:"compress_concurrency"` // 压缩并发
+	MaxEdge             int `yaml:"max_edge" json:"max_edge"`                         // 压缩图最长边
+	JPEGQuality         int `yaml:"jpeg_quality" json:"jpeg_quality"`                 // DD鹅 MozJPEG 质量
+	MinFileSizeKB       int `yaml:"min_file_size_kb" json:"min_file_size_kb"`         // 小于该体积视为缩略图，跳过
 }
 
 // CostConfig 成本护栏
 type CostConfig struct {
-	BatchLimit float64               `yaml:"batch_limit"` // 单批次预估费用上限（元），0=不限
-	DailyLimit float64               `yaml:"daily_limit"` // 每日累计预估上限（元），0=不限
-	Prices     map[string]ModelPrice `yaml:"prices"`      // 模型单价表
+	BatchLimit float64               `yaml:"batch_limit" json:"batch_limit"` // 单批次预估费用上限（元），0=不限
+	DailyLimit float64               `yaml:"daily_limit" json:"daily_limit"` // 每日累计预估上限（元），0=不限
+	Prices     map[string]ModelPrice `yaml:"prices" json:"prices"`           // 模型单价表
 }
 
 // PathsConfig 路径配置
 type PathsConfig struct {
-	ArchiveRoot string `yaml:"archive_root"` // 归档输出根目录
-	LibDir      string `yaml:"lib_dir"`      // DD鹅 lib 工具目录
-	DataDir     string `yaml:"data_dir"`     // 数据目录（配置/库/缓存/日志父目录）
+	ArchiveRoot string `yaml:"archive_root" json:"archive_root"` // 归档输出根目录
+	LibDir      string `yaml:"lib_dir" json:"lib_dir"`           // DD鹅 lib 工具目录
+	DataDir     string `yaml:"data_dir" json:"data_dir"`         // 数据目录（配置/库/缓存/日志父目录）
 }
 
 // Config 全量配置
 type Config struct {
-	Provider Provider       `yaml:"provider"`
-	Model    ModelConfig    `yaml:"model"`
-	Weights  Weights        `yaml:"weights"`
-	Score    ScoreConfig    `yaml:"score"`
-	Pipeline PipelineConfig `yaml:"pipeline"`
-	Cost     CostConfig     `yaml:"cost"`
-	Paths    PathsConfig    `yaml:"paths"`
+	Provider Provider       `yaml:"provider" json:"provider"`
+	Model    ModelConfig    `yaml:"model" json:"model"`
+	Weights  Weights        `yaml:"weights" json:"weights"`
+	Score    ScoreConfig    `yaml:"score" json:"score"`
+	Pipeline PipelineConfig `yaml:"pipeline" json:"pipeline"`
+	Cost     CostConfig     `yaml:"cost" json:"cost"`
+	Paths    PathsConfig    `yaml:"paths" json:"paths"`
 }
 
 // DefaultDataDir 返回默认数据目录（%LOCALAPPDATA%\SnapRank）
