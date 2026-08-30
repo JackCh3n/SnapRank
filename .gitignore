@@ -5,11 +5,11 @@
 build/bin/
 
 # Runtime
-work/
-archive/
+/work/
+/archive/
 *.db
 *.log
-logs/
+/logs/
 
 # Frontend
 frontend/node_modules/
@@ -23,4 +23,4 @@ Thumbs.db
 .vscode/
 
 # CI artifacts
-dist/
+/dist/
