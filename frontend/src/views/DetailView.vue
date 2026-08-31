@@ -52,35 +52,23 @@
             <td class="clip">{{ p.updated_at }}</td>
             <td class="clip" :title="p.error">{{ p.error || p.weakness }}</td>
             <td><button v-if="p.status === 'parse_fail' || p.status === 'failed'" class="btn plain small"
-              :disabled="running" @click="rescoreOne(p)">↻ 复检</button></td>
+              :disabled="running" @click="onRescore(p)">↻ 复检</button></td>
           </tr>
         </tbody>
       </table>
       <div v-else class="muted">暂无明细</div>
     </div>
 
-    <div v-if="preview" class="lightbox" @click.self="preview = null">
-      <div class="lightbox-card">
-        <img :src="`/api/thumb?id=${preview.id}`" />
-        <div class="lb-info">
-          <b>{{ preview.filename }}</b>
-          <span v-if="preview.dims">
-            总分 {{ preview.score.toFixed(1) }} · 技 {{ preview.dims.technique.toFixed(1) }} ·
-            构 {{ preview.dims.composition.toFixed(1) }} · 容 {{ preview.dims.content.toFixed(1) }} ·
-            色 {{ preview.dims.color.toFixed(1) }}
-          </span>
-          <span class="muted">{{ preview.strength }}</span>
-          <span class="muted">{{ preview.weakness }}</span>
-        </div>
-        <button class="btn plain small lb-close" @click="preview = null">✕ 关闭</button>
-      </div>
-    </div>
+    <!-- 统一照片详情弹窗 -->
+    <PhotoModal v-if="preview" :photo="preview" :busy="running"
+      @close="preview = null" @rescore="onRescore" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { api, toast } from '../store.js'
+import PhotoModal from '../components/PhotoModal.vue'
 
 const items = ref([])
 const total = ref(0)
@@ -120,11 +108,13 @@ function applySort() {
   })
 }
 
-async function rescoreOne(p) {
+async function onRescore(p) {
   running.value = true
   try {
     await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
-    toast(`已提交复检：${p.filename}`)
+    toast(`已提交复检：${p.filename}，完成后自动刷新`)
+    preview.value = null
+    setTimeout(() => load(), 2500) // 复检完成后刷新明细
   } catch (e) {
     toast(e.message, true)
   }
@@ -164,16 +154,6 @@ th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 th.sortable:hover { color: var(--accent); }
 .mini.clickable { cursor: zoom-in; transition: transform 0.12s; }
 .mini.clickable:hover { transform: scale(1.08); }
-.lightbox {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 100;
-  display: flex; align-items: center; justify-content: center; padding: 24px;
-}
-.lightbox-card {
-  background: var(--card); border-radius: 12px; max-width: min(860px, 92vw);
-  max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; position: relative;
-}
-.lightbox-card img { max-width: 100%; max-height: 68vh; object-fit: contain; display: block; }
-.lb-info { padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.lb-close { position: absolute; right: 10px; top: 10px; }
+
 html.dark .tag.warn { background: #3a2c12; }
 </style>

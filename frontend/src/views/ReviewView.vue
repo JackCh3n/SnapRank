@@ -102,58 +102,16 @@
       </div>
     </div>
 
-    <!-- 大图 + 评分详情弹窗 -->
-    <div v-if="preview" class="lightbox" @click.self="preview = null">
-      <div class="lightbox-card">
-        <img :src="`/api/thumb?id=${preview.id}`" />
-        <button class="btn plain small lb-close" @click="preview = null">✕ 关闭</button>
-        <div class="lb-body">
-          <div class="lb-head">
-            <b class="lb-name">{{ preview.filename }}</b>
-            <span class="lb-score" :class="scoreClass(preview.score)">
-              {{ preview.status === 'parse_fail' ? '待复检' : preview.score.toFixed(1) + ' 分' }}
-            </span>
-          </div>
-
-          <div class="lb-dims" v-if="preview.dims">
-            <div class="lb-dims-title">评分明细（维度分 × 权重 = 加权总分）</div>
-            <div class="dim-row" v-for="d in dimRows(preview)" :key="d.key">
-              <span class="dim-name">{{ d.name }}</span>
-              <div class="dim-track"><div class="dim-fill" :style="{ width: (d.value * 10) + '%', background: d.color }"></div></div>
-              <span class="dim-val">{{ d.value.toFixed(1) }} × {{ d.weightPct }}%</span>
-            </div>
-            <div class="dim-total">总分 = <b>{{ preview.score.toFixed(1) }}</b>（0–10 分制）</div>
-          </div>
-          <div v-else class="error-text">评分解析失败，暂无维度分</div>
-
-          <div class="lb-reasons">
-            <div class="lb-reason" v-if="preview.strength"><span class="lb-ico good">✓</span>{{ preview.strength }}</div>
-            <div class="lb-reason" v-if="preview.weakness"><span class="lb-ico bad">!</span>{{ preview.weakness }}</div>
-            <div class="lb-tags" v-if="preview.tags && preview.tags.length">
-              <span v-for="t in preview.tags" :key="t" class="tag">{{ t }}</span>
-            </div>
-            <div class="error-text" v-if="preview.status === 'parse_fail' && preview.error">解析失败：{{ preview.error }}</div>
-          </div>
-
-          <div class="lb-actions">
-            <button class="btn small" :disabled="sharing" @click="copyShareCard">
-              {{ sharing ? '生成中…' : copyHint }}
-            </button>
-            <a v-if="shareUrl" class="btn plain small" :href="shareUrl" :download="`SnapRank_${preview.filename.replace(/\.[^.]+$/, '')}.png`">下载卡片</a>
-            <button v-if="preview.status === 'parse_fail' || preview.status === 'failed'"
-              class="btn plain small" :disabled="state.running"
-              @click="rescoreOne(preview); preview = null">↻ 复检重评</button>
-            <button class="btn plain small" @click="preview = null">关闭</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- 统一照片详情弹窗 -->
+    <PhotoModal v-if="preview" :photo="preview" :busy="state.running"
+      @close="preview = null" @rescore="onRescore" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { state, api, toast } from '../store.js'
+import PhotoModal from '../components/PhotoModal.vue'
 
 const bucketNames = ['35_精选', '34_良好', '33_一般', '30_待清理', '29_待复检']
 const bucketColors = ['#07c160', '#10aeff', '#ffa300', '#888888', '#fa5151']
@@ -167,160 +125,6 @@ const recalcing = ref(false)
 const archiving = ref(false)
 const archiveResult = ref(null)
 const preview = ref(null)
-const sharing = ref(false)
-const copyHint = ref('📋 复制分享卡片')
-const shareUrl = ref('')
-
-// 绘制带品牌边框的分享卡片（canvas），返回 blob
-function loadImg(src, timeoutMs = 8000) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    const timer = setTimeout(() => reject(new Error('图片加载超时')), timeoutMs)
-    img.onload = () => { clearTimeout(timer); resolve(img) }
-    img.onerror = () => { clearTimeout(timer); reject(new Error('图片加载失败')) }
-    img.src = src
-  })
-}
-
-async function buildShareCard(p) {
-  const img = await loadImg(`/api/thumb?id=${p.id}`)
-
-  const W = 900
-  const pad = 28            // 品牌边框留白
-  const imgH = Math.round(W * (img.naturalHeight / img.naturalWidth))
-  const infoH = 250
-  const canvas = document.createElement('canvas')
-  canvas.width = W + pad * 2
-  canvas.height = pad * 2 + imgH + infoH
-  const ctx = canvas.getContext('2d')
-
-  // 背景与品牌边框（暗色卡片 + 绿色描边 + 圆角）
-  ctx.fillStyle = '#101418'
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.strokeStyle = '#07c160'
-  ctx.lineWidth = 3
-  roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 18)
-  ctx.stroke()
-
-  // 照片（圆角裁剪）
-  ctx.save()
-  roundRect(ctx, pad, pad + 34, W, imgH, 12)
-  ctx.clip()
-  ctx.drawImage(img, pad, pad + 34, W, imgH)
-  ctx.restore()
-
-  // 品牌头：帧选 SnapRank
-  ctx.fillStyle = '#07c160'
-  ctx.font = 'bold 22px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.textBaseline = 'middle'
-  ctx.fillText('帧选 SnapRank', pad, pad + 16)
-  ctx.fillStyle = 'rgba(255,255,255,0.45)'
-  ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.textAlign = 'right'
-  ctx.fillText('AI 摄影评分', pad + W, pad + 16)
-  ctx.textAlign = 'left'
-
-  let y = pad + 34 + imgH + 30
-  // 总分（大号）
-  ctx.fillStyle = '#ffffff'
-  ctx.font = 'bold 46px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText(p.score.toFixed(1), pad, y + 20)
-  ctx.fillStyle = 'rgba(255,255,255,0.5)'
-  ctx.font = '15px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText('总分 / 10', pad + 86, y + 26)
-
-  // 四维小条
-  const dims = [
-    ['技术', p.dims.technique, 0.4, '#07c160'],
-    ['构图', p.dims.composition, 0.3, '#10aeff'],
-    ['内容', p.dims.content, 0.2, '#ffa300'],
-    ['色彩', p.dims.color, 0.1, '#af52de'],
-  ]
-  const barW = 240
-  dims.forEach((d, i) => {
-    const col = i % 2, row = Math.floor(i / 2)
-    const x = pad + 190 + col * 330
-    const yy = y + 4 + row * 28
-    ctx.fillStyle = 'rgba(255,255,255,0.75)'
-    ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif'
-    ctx.fillText(d[0], x, yy)
-    // 背景 + 得分条
-    ctx.fillStyle = 'rgba(255,255,255,0.12)'
-    roundRect(ctx, x + 40, yy - 7, barW, 10, 5)
-    ctx.fill()
-    ctx.fillStyle = d[3]
-    roundRect(ctx, x + 40, yy - 7, Math.max(8, barW * (d[1] / 10)), 10, 5)
-    ctx.fill()
-    ctx.fillStyle = 'rgba(255,255,255,0.85)'
-    ctx.fillText(d[1].toFixed(1), x + 40 + barW + 10, yy)
-  })
-
-  // 评语（优点/不足，自动换行截断）
-  y += 92
-  ctx.font = '15px "PingFang SC", "Microsoft YaHei", sans-serif'
-  if (p.strength) {
-    ctx.fillStyle = '#07c160'
-    ctx.fillText('✓ ' + wrapText(ctx, p.strength, W - 20)[0], pad, y)
-    y += 24
-  }
-  if (p.weakness) {
-    ctx.fillStyle = '#e8a23a'
-    ctx.fillText('! ' + wrapText(ctx, p.weakness, W - 20)[0], pad, y)
-    y += 24
-  }
-  // 标签
-  if (p.tags && p.tags.length) {
-    ctx.fillStyle = 'rgba(255,255,255,0.55)'
-    ctx.fillText(p.tags.slice(0, 4).map(t => '#' + t).join('  '), pad, Math.min(y + 4, canvas.height - pad - 14))
-  }
-  return canvas
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.arcTo(x + w, y, x + w, y + h, r)
-  ctx.arcTo(x + w, y + h, x, y + h, r)
-  ctx.arcTo(x, y + h, x, y, r)
-  ctx.arcTo(x, y, x + w, y, r)
-  ctx.closePath()
-}
-
-function wrapText(ctx, text, maxWidth) {
-  const lines = []
-  let line = ''
-  for (const ch of text) {
-    if (ctx.measureText(line + ch).width > maxWidth) { lines.push(line); line = ch }
-    else line += ch
-  }
-  if (line) lines.push(line)
-  return lines
-}
-
-async function copyShareCard() {
-  if (!preview.value) return
-  sharing.value = true
-  copyHint.value = '生成中…'
-  try {
-    const canvas = await buildShareCard(preview.value)
-    shareUrl.value = canvas.toDataURL('image/png')
-    // 优先 ClipboardItem 写图片；旧浏览器降级提示用下载
-    let copied = false
-    if (navigator.clipboard && window.ClipboardItem) {
-      const blob = await new Promise(res => canvas.toBlob(res, 'image/png'))
-      try {
-        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-        copied = true
-      } catch { /* 部分环境不支持图片写入 */ }
-    }
-    copyHint.value = copied ? '✅ 已复制，可直接粘贴分享' : '已生成，请用“下载卡片”'
-  } catch (e) {
-    copyHint.value = '生成失败'
-    toast(e.message, true)
-  }
-  sharing.value = false
-  setTimeout(() => { copyHint.value = '📋 复制分享卡片' }, 4000)
-}
 
 // 弹窗评分明细行：维度分 + 归一化权重
 function dimRows(p) {
@@ -345,10 +149,11 @@ const parseFailCount = computed(() => {
   return (s && s.status && s.status.parse_fail) || 0
 })
 
-async function rescoreOne(p) {
+async function onRescore(p) {
   try {
     await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
     toast(`已提交复检：${p.filename}，完成后自动刷新`)
+    preview.value = null
   } catch (e) {
     toast(e.message, true)
   }
@@ -491,34 +296,5 @@ html.dark .thumb-wrap { background: #333; }
 .card-actions .bucket-sel { margin: 0; flex: 1; min-width: 0; }
 .parse-fail { outline: 2px solid var(--danger); outline-offset: -2px; border-radius: 10px; }
 .thumb-wrap.clickable { cursor: zoom-in; }
-.lightbox {
-  position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 100;
-  display: flex; align-items: center; justify-content: center; padding: 24px;
-}
-.lightbox-card {
-  background: var(--card); border-radius: 14px; max-width: min(880px, 94vw);
-  max-height: 92vh; overflow-y: auto; position: relative;
-}
-.lightbox-card > img { max-width: 100%; max-height: 56vh; object-fit: contain; display: block; }
-.lb-close { position: absolute; right: 10px; top: 10px; }
-.lb-body { padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 12px; }
-.lb-head { display: flex; align-items: center; gap: 12px; }
-.lb-name { font-size: 15px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lb-score { padding: 3px 12px; border-radius: 999px; color: #fff; font-weight: 700; background: #888; }
-.lb-dims { display: flex; flex-direction: column; gap: 6px; }
-.lb-dims-title { font-size: 13px; color: var(--text-2); }
-.dim-row { display: flex; align-items: center; gap: 10px; }
-.dim-name { width: 64px; font-size: 13px; }
-.dim-track { flex: 1; height: 10px; background: var(--card-2); border-radius: 999px; overflow: hidden; }
-.dim-fill { height: 100%; border-radius: 999px; transition: width 0.3s; }
-.dim-val { width: 110px; text-align: right; font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.dim-total { font-size: 13px; color: var(--text-2); text-align: right; }
-.lb-reasons { display: flex; flex-direction: column; gap: 6px; }
-.lb-reason { display: flex; gap: 8px; font-size: 13px; line-height: 1.5; align-items: baseline; }
-.lb-ico { flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-flex;
-  align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: 700; }
-.lb-ico.good { background: var(--accent); }
-.lb-ico.bad { background: var(--warn); }
-.lb-tags { display: flex; gap: 6px; flex-wrap: wrap; }
-.lb-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
 </style>
