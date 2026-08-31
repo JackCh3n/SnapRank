@@ -48,6 +48,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/photo", s.handlePhoto)
 	s.mux.HandleFunc("POST /api/photo/bucket", s.handleBucket)
 	s.mux.HandleFunc("POST /api/recalculate", s.handleRecalc)
+	s.mux.HandleFunc("POST /api/rescore", s.handleRescore)
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
@@ -224,6 +225,34 @@ func (s *Server) handleRecalc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]int{"recalculated": n})
 }
 
+// handleRescore 复检重评：单张/多张（force=true 忽略缓存）或全部待复检（all=true）
+func (s *Server) handleRescore(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs   []int64 `json:"ids"`
+		Force bool    `json:"force"`
+		All   bool    `json:"all"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if req.All {
+		sessID, n, err := s.core.RescoreParseFail()
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{"session_id": sessID, "count": n})
+		return
+	}
+	sessID, err := s.core.Rescore(req.IDs, req.Force)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"session_id": sessID, "count": len(req.IDs)})
+}
+
 func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mode string `json:"mode"`
@@ -319,9 +348,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeSSE(w http.ResponseWriter, fl http.Flusher, ev pipeline.Event) {
-	data, err := json.Marshal(ev)
+	// data 字段只放载荷本体（类型已在 event: 行中），
+	// 前端 JSON.parse 后即为 payload；若序列化整个信封会导致前端读到双层包装。
+	data, err := json.Marshal(ev.Data)
 	if err != nil {
-		return
+		data = []byte("{}")
 	}
 	io.WriteString(w, "event: "+ev.Type+"\ndata: "+string(data)+"\n\n")
 	fl.Flush()

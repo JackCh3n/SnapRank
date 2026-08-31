@@ -321,6 +321,83 @@ func (e *Engine) resetIfChanged(id int64, curFP string) {
 	}
 }
 
+// Rescore 复检重评：把指定照片重置为待处理并立即重跑（走当前所选模型），
+// 已有压缩缓存命中即跳过压缩，0 重复压缩；forceCost=true 时忽略跨会话评分缓存强制重调 API。
+func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
+	if e.IsRunning() {
+		return "", errors.New("已有任务在运行中")
+	}
+	if len(ids) == 0 {
+		return "", errors.New("未选择要重评的照片")
+	}
+	sess, err := e.store.LastSession()
+	if err != nil {
+		return "", errors.New("暂无会话")
+	}
+	cfg := e.cfgFn()
+	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
+		return "", errors.New("尚未配置 API Key（或切换到 mock 模式体验）")
+	}
+	n := 0
+	for _, id := range ids {
+		p, err := e.store.GetPhoto(id)
+		if err != nil || p == nil || p.SessionID != sess.ID {
+			continue
+		}
+		e.store.ResetPhoto(id)
+		if forceCost {
+			// 重置后清除指纹缓存条目，强制重调 API（同模型+版本）
+			e.store.CacheDelete(p.Fingerprint, p.Model, p.PromptVersion)
+		}
+		n++
+	}
+	if n == 0 {
+		return "", errors.New("所选照片不属于当前会话")
+	}
+	model := e.CurrentSessionModel(sess.ID)
+	if model == "" {
+		model = cfg.Model.Default
+	}
+	if err := e.startAsync(sess.ID, StartOpts{Dir: sess.SourceDir}, model, n); err != nil {
+		return "", err
+	}
+	logutil.Info("复检重评 %d 张（会话 %s，强制重调=%v）", n, sess.ID, forceCost)
+	return sess.ID, nil
+}
+
+// RescoreParseFail 一键重评当前会话全部解析失败的照片
+func (e *Engine) RescoreParseFail() (string, int, error) {
+	if e.IsRunning() {
+		return "", 0, errors.New("已有任务在运行中")
+	}
+	sess, err := e.store.LastSession()
+	if err != nil {
+		return "", 0, errors.New("暂无会话")
+	}
+	photos, _, err := e.store.ListPhotos(sess.ID, store.StatusParseFail, 0, 1<<20)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(photos) == 0 {
+		return "", 0, errors.New("没有待复检的照片")
+	}
+	ids := make([]int64, 0, len(photos))
+	for _, p := range photos {
+		ids = append(ids, p.ID)
+	}
+	sessID, err := e.Rescore(ids, true)
+	return sessID, len(ids), err
+}
+
+// CurrentSessionModel 会话锁定的模型
+func (e *Engine) CurrentSessionModel(sessID string) string {
+	s, err := e.store.GetSession(sessID)
+	if err != nil {
+		return ""
+	}
+	return s.Model
+}
+
 func relPath(dir, path string) string {
 	r, err := filepath.Rel(dir, path)
 	if err != nil {

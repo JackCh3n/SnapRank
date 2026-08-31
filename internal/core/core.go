@@ -248,6 +248,14 @@ func (c *Core) Archive(mode string) (*pipeline.ArchiveSummary, error) {
 // Recalculate 权重变更后本地重算
 func (c *Core) Recalculate() (int, error) { return c.Engine().Recalculate() }
 
+// Rescore 复检重评指定照片（force=true 忽略缓存强制重调 API）
+func (c *Core) Rescore(ids []int64, force bool) (string, error) {
+	return c.Engine().Rescore(ids, force)
+}
+
+// RescoreParseFail 一键重评全部解析失败照片
+func (c *Core) RescoreParseFail() (string, int, error) { return c.Engine().RescoreParseFail() }
+
 // ---------- 明细 / 缩略图 / 调档 ----------
 
 // PhotoPage 明细分页

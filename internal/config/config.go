@@ -107,7 +107,7 @@ func Default() *Config {
 	return &Config{
 		Provider: Provider{
 			Type:    "tokenrhythm",
-			BaseURL: "https://api.tokenrhythm.studio/v1",
+			BaseURL: "https://tokenrhythm.studio/v1",
 			APIKey:  "",
 		},
 		Model: ModelConfig{

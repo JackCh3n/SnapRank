@@ -465,6 +465,13 @@ func (s *Store) CachePut(fingerprint, model, promptVersion string, dims Dims, ta
 	return err
 }
 
+// CacheDelete 删除缓存条目（复检强制重调 API 时用）
+func (s *Store) CacheDelete(fingerprint, model, promptVersion string) error {
+	_, err := s.db.Exec(`DELETE FROM score_cache WHERE fingerprint=? AND model=? AND prompt_version=?`,
+		fingerprint, model, promptVersion)
+	return err
+}
+
 // ---------- spend_log ----------
 
 // SpendToday 当日累计预估费用
