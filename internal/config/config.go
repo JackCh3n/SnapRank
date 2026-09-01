@@ -38,11 +38,12 @@ type ModelConfig struct {
 
 // ScoreConfig 评分参数
 type ScoreConfig struct {
-	Temperature float32   `yaml:"temperature" json:"temperature"`
-	MaxTokens   int       `yaml:"max_tokens" json:"max_tokens"`
-	TimeoutSec  int       `yaml:"timeout_sec" json:"timeout_sec"`
-	Thresholds  []float64 `yaml:"thresholds" json:"thresholds"`     // 分档阈值，降序，默认 [9,7,5]
-	ReuseScores bool      `yaml:"reuse_scores" json:"reuse_scores"` // 跨会话指纹缓存复用评分（0 计费）
+	Temperature     float32   `yaml:"temperature" json:"temperature"`
+	ReasoningEffort string    `yaml:"reasoning_effort" json:"reasoning_effort"` // 思考强度: 空=模型默认 | low | medium | high
+	MaxTokens       int       `yaml:"max_tokens" json:"max_tokens"`
+	TimeoutSec      int       `yaml:"timeout_sec" json:"timeout_sec"`
+	Thresholds      []float64 `yaml:"thresholds" json:"thresholds"`     // 分档阈值，降序，默认 [9,7,5]
+	ReuseScores     bool      `yaml:"reuse_scores" json:"reuse_scores"` // 跨会话指纹缓存复用评分（0 计费）
 }
 
 // PipelineConfig 流水线参数
@@ -201,6 +202,11 @@ func (c *Config) normalize() {
 	}
 	if c.Score.Temperature <= 0 {
 		c.Score.Temperature = d.Score.Temperature
+	}
+	switch c.Score.ReasoningEffort {
+	case "", "low", "medium", "high":
+	default:
+		c.Score.ReasoningEffort = ""
 	}
 	if c.Score.MaxTokens <= 0 {
 		c.Score.MaxTokens = d.Score.MaxTokens

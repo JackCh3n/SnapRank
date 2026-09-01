@@ -572,6 +572,7 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		Temp:      cfg.Score.Temperature,
 		MaxTokens: cfg.Score.MaxTokens,
 		Timeout:   time.Duration(cfg.Score.TimeoutSec) * time.Second,
+		Effort:    cfg.Score.ReasoningEffort,
 	}
 
 	var content string

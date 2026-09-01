@@ -49,6 +49,15 @@
       <h3 class="title">评分参数</h3>
       <div class="row">
         <label class="field">temperature <input type="number" step="0.1" min="0" max="1" v-model="cfg.score.temperature" style="width: 90px" /></label>
+        <label class="field">
+          思考强度
+          <select v-model="cfg.score.reasoning_effort" style="width: 130px">
+            <option value="">模型默认</option>
+            <option value="low">low（快/省）</option>
+            <option value="medium">medium</option>
+            <option value="high">high（慢/细）</option>
+          </select>
+        </label>
         <label class="field">max_tokens <input type="number" v-model="cfg.score.max_tokens" style="width: 90px" /></label>
         <label class="field">超时（秒）<input type="number" v-model="cfg.score.timeout_sec" style="width: 90px" /></label>
         <label class="field">阈值①精选 ≥ <input type="number" step="0.5" v-model="cfg.score.thresholds[0]" style="width: 70px" /></label>

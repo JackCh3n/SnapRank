@@ -32,6 +32,7 @@ type ScoreRequest struct {
 	Temp      float32
 	MaxTokens int
 	Timeout   time.Duration
+	Effort    string // 思考强度: ""=模型默认 | low | medium | high（仅思考型模型生效）
 }
 
 // Provider 平台抽象
@@ -127,6 +128,9 @@ func (t *TokenRhythm) Score(ctx context.Context, model string, req ScoreRequest)
 		}
 		if jsonMode {
 			r.ResponseFormat = &openai.ChatCompletionResponseFormat{Type: openai.ChatCompletionResponseFormatTypeJSONObject}
+		}
+		if req.Effort != "" {
+			r.ReasoningEffort = req.Effort
 		}
 		resp, err := t.client.CreateChatCompletion(ctx, r)
 		if err != nil {
