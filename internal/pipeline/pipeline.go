@@ -714,18 +714,17 @@ type ArchiveSummary struct {
 	Errors    []string       `json:"errors,omitempty"`
 }
 
-// Archive 执行阶段二：按确认的方式复制/移动到档位目录并导出报告
-func (e *Engine) Archive(mode archive.Mode) (*ArchiveSummary, error) {
+// Archive 执行阶段二：按确认的方式复制/移动到档位目录并导出报告；sessionID 为空取最近会话
+func (e *Engine) Archive(mode archive.Mode, sessionID string) (*ArchiveSummary, error) {
 	if e.IsRunning() {
 		return nil, errors.New("任务运行中，请先停止或等待完成")
 	}
 	if !archive.ValidMode(mode) {
 		return nil, fmt.Errorf("非法归档方式: %s", mode)
 	}
-	cfg := e.cfgFn()
-	sess, err := e.store.LastSession()
+	sess, err := e.resolveSession(sessionID)
 	if err != nil {
-		return nil, errors.New("暂无可归档的会话")
+		return nil, err
 	}
 	photos, err := e.store.ScoredPhotos(sess.ID)
 	if err != nil {
@@ -734,6 +733,7 @@ func (e *Engine) Archive(mode archive.Mode) (*ArchiveSummary, error) {
 	if len(photos) == 0 {
 		return nil, errors.New("该会话没有可归档的评分结果")
 	}
+	cfg := e.cfgFn()
 	sessionDir := filepath.Join(cfg.Paths.ArchiveRoot, sess.ID)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return nil, err
@@ -818,10 +818,10 @@ type Summary struct {
 	ArchiveDir string         `json:"archive_dir,omitempty"`
 }
 
-// GetSummary 汇总最近会话
-func (e *Engine) GetSummary() (*Summary, error) {
+// GetSummary 汇总会话；sessionID 为空取最近会话
+func (e *Engine) GetSummary(sessionID string) (*Summary, error) {
 	cfg := e.cfgFn()
-	sess, err := e.store.LastSession()
+	sess, err := e.resolveSession(sessionID)
 	if err != nil {
 		return nil, nil // 尚无会话不是错误
 	}
@@ -859,10 +859,10 @@ func (e *Engine) GetSummary() (*Summary, error) {
 	return sum, nil
 }
 
-// Recalculate 权重变更后基于已存维度分本地重算总分（0 API 成本）
-func (e *Engine) Recalculate() (int, error) {
+// Recalculate 权重变更后基于已存维度分本地重算总分（0 API 成本）；sessionID 为空取最近会话
+func (e *Engine) Recalculate(sessionID string) (int, error) {
 	cfg := e.cfgFn()
-	sess, err := e.store.LastSession()
+	sess, err := e.resolveSession(sessionID)
 	if err != nil {
 		return 0, nil
 	}
@@ -875,6 +875,22 @@ func (e *Engine) Recalculate() (int, error) {
 		return 0, err
 	}
 	return len(scores), nil
+}
+
+// resolveSession 解析目标会话：sessionID 为空时取最近会话
+func (e *Engine) resolveSession(sessionID string) (*store.Session, error) {
+	if sessionID != "" {
+		sess, err := e.store.GetSession(sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("会话不存在: %s", sessionID)
+		}
+		return sess, nil
+	}
+	sess, err := e.store.LastSession()
+	if err != nil {
+		return nil, errors.New("暂无会话")
+	}
+	return sess, nil
 }
 
 // ---------- utils ----------

@@ -224,7 +224,7 @@ func runCmd(args []string) {
 		return
 	}
 
-	sum, err := c.Summary()
+	sum, err := c.Summary("")
 	if err == nil && sum != nil {
 		fmt.Printf("评分完成：均分 %.1f，最高 %.1f\n", sum.AvgScore, sum.MaxScore)
 		for _, b := range []string{"35_精选", "34_良好", "33_一般", "30_待清理", "29_待复检"} {
@@ -250,7 +250,7 @@ func runCmd(args []string) {
 			return
 		}
 	}
-	as, err := c.Archive(string(mode))
+	as, err := c.Archive(string(mode), "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "归档失败: %v\n", err)
 		os.Exit(1)

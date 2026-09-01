@@ -4,6 +4,9 @@
     <div class="card">
       <div class="head">
         <h3 class="title">批次分布</h3>
+        <select v-model="sessionID" @change="onSessionChange" class="session-sel" title="切换历史会话">
+          <option v-for="s in sessions" :key="s.id" :value="s.id">{{ s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）</option>
+        </select>
         <div class="muted" v-if="summary">
           均分 <b>{{ summary.avg_score.toFixed(1) }}</b> · 最高 <b>{{ summary.max_score.toFixed(1) }}</b> ·
           预估费用 ¥{{ summary.est_cost.toFixed(3) }}
@@ -125,6 +128,30 @@ const recalcing = ref(false)
 const archiving = ref(false)
 const archiveResult = ref(null)
 const preview = ref(null)
+const sessionID = ref('')
+const sessions = ref([])
+
+function shortDir(d) {
+  if (!d) return ''
+  const parts = d.split(/[\\/]+/).filter(Boolean)
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : d
+}
+
+async function onSessionChange() {
+  await Promise.all([loadSummary(), loadPhotos()])
+}
+
+async function loadSummary() {
+  const r = await api(`/api/summary?session=${sessionID.value}`).catch(() => null)
+  state.summary = r
+}
+
+async function loadSessions() {
+  try {
+    sessions.value = await api('/api/sessions')
+    if (!sessionID.value && sessions.value.length) sessionID.value = sessions.value[0].id
+  } catch { /* 无会话 */ }
+}
 
 // 弹窗评分明细行：维度分 + 归一化权重
 function dimRows(p) {
@@ -197,7 +224,7 @@ function thumbFail(p) { p._noThumb = true }
 
 async function loadPhotos() {
   try {
-    const r = await api('/api/photos?page=1&page_size=200')
+    const r = await api(`/api/photos?page=1&page_size=200&session=${sessionID.value}`)
     photos.value = (r.items || []).filter((p) => p.status === 'scored' || p.status === 'parse_fail')
   } catch { /* 尚无会话 */ }
 }
@@ -212,7 +239,7 @@ async function saveAndRecalc() {
         technique: +w.value.technique, composition: +w.value.composition,
         content: +w.value.content, color: +w.value.color } }),
     })
-    const r = await api('/api/recalculate', { method: 'POST', body: '{}' })
+    const r = await api('/api/recalculate', { method: 'POST', body: JSON.stringify({ session: sessionID.value }) })
     toast(`已按新权重重算 ${r.recalculated} 张`)
     await loadPhotos()
   } catch (e) {
@@ -238,7 +265,7 @@ async function doArchive() {
     if (archiveRoot.value && archiveRoot.value !== state.config.paths.archive_root) {
       await api('/api/config', { method: 'POST', body: JSON.stringify({ paths: { ...state.config.paths, archive_root: archiveRoot.value } }) })
     }
-    archiveResult.value = await api('/api/archive', { method: 'POST', body: JSON.stringify({ mode: mode.value }) })
+    archiveResult.value = await api('/api/archive', { method: 'POST', body: JSON.stringify({ mode: mode.value, session: sessionID.value }) })
     toast('归档完成')
   } catch (e) {
     toast(e.message, true)
@@ -254,19 +281,20 @@ async function openFolder() {
 
 onMounted(async () => {
   const r = await api('/api/state')
-  state.summary = r.summary
   state.config = r.config
   if (r.config) {
     w.value = { ...r.config.weights }
     archiveRoot.value = r.config.paths.archive_root
   }
-  await loadPhotos()
+  await loadSessions()
+  await Promise.all([loadSummary(), loadPhotos()])
 })
 </script>
 
 <style scoped>
 .grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.session-sel { max-width: 320px; font-size: 13px; padding: 5px 8px; }
 .bars { display: flex; gap: 26px; align-items: flex-end; padding: 6px 4px; }
 .bar-item { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 72px; }
 .bar-num { font-weight: 600; }

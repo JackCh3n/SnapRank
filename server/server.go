@@ -82,7 +82,7 @@ func decodeBody(r *http.Request, v interface{}) error {
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	eng := s.core.Engine()
-	sum, _ := s.core.Summary()
+	sum, _ := s.core.Summary(r.URL.Query().Get("session"))
 	writeJSON(w, 200, map[string]interface{}{
 		"config":       s.core.GetConfig(),
 		"currentModel": s.core.GetCurrentModel(),
@@ -174,7 +174,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
-	sum, err := s.core.Summary()
+	sum, err := s.core.Summary(r.URL.Query().Get("session"))
 	if err != nil {
 		writeErr(w, 500, err)
 		return
@@ -240,7 +240,11 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecalc(w http.ResponseWriter, r *http.Request) {
-	n, err := s.core.Recalculate()
+	var req struct {
+		Session string `json:"session"`
+	}
+	decodeBody(r, &req)
+	n, err := s.core.Recalculate(req.Session)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
@@ -304,13 +308,14 @@ func (s *Server) handleRescore(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Mode string `json:"mode"`
+		Mode    string `json:"mode"`
+		Session string `json:"session"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	sum, err := s.core.Archive(req.Mode)
+	sum, err := s.core.Archive(req.Mode, req.Session)
 	if err != nil {
 		writeErr(w, 400, err)
 		return
@@ -425,6 +430,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "frontend not built", 500)
 		return
+	}
+	if path == "index.html" {
+		w.Header().Set("Cache-Control", "no-cache") // 前端发版后浏览器立取新版
 	}
 	w.Header().Set("Content-Type", mimeOf(path))
 	w.Write(data)

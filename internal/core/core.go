@@ -242,16 +242,18 @@ func (c *Core) Start(opts pipeline.StartOpts) (string, error) {
 // Stop 停止
 func (c *Core) Stop() bool { return c.Engine().Stop() }
 
-// Summary 批次统计
-func (c *Core) Summary() (*pipeline.Summary, error) { return c.Engine().GetSummary() }
+// Summary 批次统计（sessionID 为空取最近会话）
+func (c *Core) Summary(sessionID string) (*pipeline.Summary, error) {
+	return c.Engine().GetSummary(sessionID)
+}
 
 // Archive 执行归档（阶段二）
-func (c *Core) Archive(mode string) (*pipeline.ArchiveSummary, error) {
-	return c.Engine().Archive(archive.Mode(mode))
+func (c *Core) Archive(mode, sessionID string) (*pipeline.ArchiveSummary, error) {
+	return c.Engine().Archive(archive.Mode(mode), sessionID)
 }
 
 // Recalculate 权重变更后本地重算
-func (c *Core) Recalculate() (int, error) { return c.Engine().Recalculate() }
+func (c *Core) Recalculate(sessionID string) (int, error) { return c.Engine().Recalculate(sessionID) }
 
 // Rescore 复检重评指定照片（force=true 忽略缓存强制重调 API）
 func (c *Core) Rescore(ids []int64, force bool) (string, error) {
