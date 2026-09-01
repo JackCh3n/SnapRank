@@ -106,6 +106,15 @@
       <button class="btn" :disabled="saving" @click="save">保存配置</button>
       <span class="muted">保存后立即生效；模型切换在下一批次生效</span>
     </div>
+
+    <div class="card danger-zone">
+      <h3 class="title">危险区</h3>
+      <div class="row">
+        <button class="btn danger" :disabled="clearing" @click="clearAll">{{ clearing ? '清空中…' : '🗑️ 清空全部数据' }}</button>
+        <span class="muted">删除全部会话/评分明细/评分缓存/费用记录与压缩缓存，<b>不影响源图与归档照片</b>；配置保留。操作不可恢复。</span>
+      </div>
+      <div v-if="clearMsg" class="muted" style="margin-top: 6px">{{ clearMsg }}</div>
+    </div>
   </div>
 </template>
 
@@ -119,6 +128,21 @@ const pricesJson = ref('')
 const testing = ref(false)
 const saving = ref(false)
 const connState = ref(null)
+const clearing = ref(false)
+const clearMsg = ref('')
+
+async function clearAll() {
+  if (!confirm('确定清空全部数据？将删除：所有会话、评分明细、评分缓存、费用记录、压缩缓存。不影响源图与已归档照片。此操作不可恢复！')) return
+  if (!confirm('再次确认：真的要清空全部数据吗？')) return
+  clearing.value = true
+  try {
+    const r = await api('/api/clear-all', { method: 'POST', body: '{}' })
+    clearMsg.value = `✅ 已清空（释放 ${r.freed_mb.toFixed(1)} MB 缓存）。历史会话与明细已删除。`
+  } catch (e) {
+    clearMsg.value = '清空失败：' + e.message
+  }
+  clearing.value = false
+}
 
 async function testConn() {
   testing.value = true
@@ -169,4 +193,6 @@ onMounted(async () => {
 <style scoped>
 .grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .grow { flex: 1; min-width: 240px; }
+.danger-zone { border: 1px solid var(--danger); }
+.danger-zone .title { color: var(--danger); }
 </style>

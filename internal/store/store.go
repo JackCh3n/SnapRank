@@ -210,6 +210,31 @@ func (s *Store) FindResumableSession(sourceDir string) (*Session, error) {
 	return &se, nil
 }
 
+// ListSessions 全部会话（新→旧）
+func (s *Store) ListSessions() ([]*Session, error) {
+	rows, err := s.db.Query(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done
+		FROM sessions ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Session
+	for rows.Next() {
+		var se Session
+		if err := rows.Scan(&se.ID, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+			return nil, err
+		}
+		list = append(list, &se)
+	}
+	return list, rows.Err()
+}
+
+// ClearAllData 清空业务数据（会话/明细/评分缓存/费用记录），保留配置
+func (s *Store) ClearAllData() error {
+	_, err := s.db.Exec(`DELETE FROM photos; DELETE FROM sessions; DELETE FROM score_cache; DELETE FROM spend_log;`)
+	return err
+}
+
 // LastSession 最近一次会话
 func (s *Store) LastSession() (*Session, error) {
 	row := s.db.QueryRow(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done

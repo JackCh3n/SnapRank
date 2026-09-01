@@ -44,6 +44,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/start", s.handleStart)
 	s.mux.HandleFunc("POST /api/stop", s.handleStop)
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
+	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	s.mux.HandleFunc("POST /api/clear-all", s.handleClearAll)
 	s.mux.HandleFunc("GET /api/photos", s.handlePhotos)
 	s.mux.HandleFunc("GET /api/photo", s.handlePhoto)
 	s.mux.HandleFunc("POST /api/photo/bucket", s.handleBucket)
@@ -178,6 +180,25 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, sum)
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	list, err := s.core.ListSessions()
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, list)
+}
+
+// handleClearAll 一键清空全部业务数据（危险操作，前端需二次确认）
+func (s *Server) handleClearAll(w http.ResponseWriter, r *http.Request) {
+	freed, err := s.core.ClearAllData()
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": "1", "freed_mb": float64(freed) / 1048576})
 }
 
 func (s *Server) handlePhotos(w http.ResponseWriter, r *http.Request) {

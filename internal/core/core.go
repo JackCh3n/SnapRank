@@ -368,6 +368,20 @@ func (c *Core) RemoveDirHistory(dir string) error {
 	return err
 }
 
+// ListSessions 全部会话
+func (c *Core) ListSessions() ([]*store.Session, error) { return c.st.ListSessions() }
+
+// ClearAllData 一键清空全部业务数据（会话/明细/缓存/费用 + 压缩缓存目录），保留配置
+func (c *Core) ClearAllData() (int64, error) {
+	if c.Engine().IsRunning() {
+		return 0, fmt.Errorf("任务运行中，请先停止或等待完成")
+	}
+	if err := c.st.ClearAllData(); err != nil {
+		return 0, err
+	}
+	return c.CleanWorkCache()
+}
+
 // CleanWorkCache 清理压缩图缓存（data/work 整目录），返回释放的字节数（近似）。
 // 缓存按指纹可重建，清理后重跑同批照片会重新压缩（评分缓存仍在，不会重复计费）。
 func (c *Core) CleanWorkCache() (int64, error) {

@@ -4,6 +4,14 @@
       <div class="row" style="justify-content: space-between">
         <div class="row">
           <label class="field">
+            会话
+            <select v-model="sessionID" @change="load(1)">
+              <option v-for="s in sessions" :key="s.id" :value="s.id">
+                {{ s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）
+              </option>
+            </select>
+          </label>
+          <label class="field">
             状态
             <select v-model="status" @change="load(1)">
               <option value="">全部</option>
@@ -107,6 +115,8 @@ const loadSortTick = ref(0)
 const modelFilter = ref('')
 const sourceFilter = ref('')
 const bandFilter = ref('')
+const sessionID = ref('')
+const sessions = ref([])
 
 // 分数段判定（跟随配置阈值 t=[high,mid,low]）
 function bandOf(p) {
@@ -178,18 +188,34 @@ function statusLabel(s) {
   }[s] || s
 }
 
+function shortDir(d) {
+  if (!d) return ''
+  const parts = d.split(/[\/]+/).filter(Boolean)
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : d
+}
+
 function d(p, k) {
   return p.dims ? p.dims[k].toFixed(1) : '-'
 }
 
 async function load(pg) {
   page.value = pg || page.value
-  const r = await api(`/api/photos?page=${page.value}&page_size=${pageSize}&status=${status.value}`)
+  const r = await api(`/api/photos?page=${page.value}&page_size=${pageSize}&status=${status.value}&session=${sessionID.value}`)
   items.value = r.items || []
   total.value = r.total || 0
 }
 
-onMounted(() => load(1))
+async function loadSessions() {
+  try {
+    sessions.value = await api('/api/sessions')
+    if (!sessionID.value && sessions.value.length) sessionID.value = sessions.value[0].id
+  } catch { /* 无会话 */ }
+}
+
+onMounted(async () => {
+  await loadSessions()
+  load(1)
+})
 </script>
 
 <style scoped>
