@@ -146,13 +146,14 @@ func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Dir string `json:"dir"`
+		Dir     string   `json:"dir"`
+		Formats []string `json:"formats"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	items, estCost, err := s.core.Scan(req.Dir)
+	items, estCost, err := s.core.Scan(req.Dir, req.Formats)
 	if err != nil {
 		writeErr(w, 400, err)
 		return

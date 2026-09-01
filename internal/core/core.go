@@ -222,9 +222,9 @@ func (c *Core) SetCurrentModel(id string) error {
 
 // ---------- 扫描 / 流水线 ----------
 
-// Scan 扫描目录
-func (c *Core) Scan(dir string) ([]*pipeline.ScanItem, float64, error) {
-	return c.Engine().Scan(dir)
+// Scan 扫描目录（formats 为格式白名单，空=全部支持格式）
+func (c *Core) Scan(dir string, formats []string) ([]*pipeline.ScanItem, float64, error) {
+	return c.Engine().Scan(dir, formats)
 }
 
 // Start 启动流水线（阶段一）

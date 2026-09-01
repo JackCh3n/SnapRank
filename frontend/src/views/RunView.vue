@@ -9,7 +9,20 @@
         </label>
         <button class="btn plain" :disabled="picking" :title="picking ? '请在弹出的窗口中选择目录' : '弹出系统目录选择框'"
           @click="pickDir">{{ picking ? '选择中…' : '📁 选择目录' }}</button>
+        <label class="field">
+          格式筛选
+          <select v-model="formatPreset" style="width: 150px" @change="rescanIfScanned">
+            <option value="">全部支持格式</option>
+            <option value="jpg">仅 JPG</option>
+            <option value="png">仅 PNG</option>
+            <option value="webp">仅 WebP</option>
+            <option value="web">JPG/PNG/WebP</option>
+          </select>
+        </label>
         <button class="btn plain" :disabled="state.running" @click="doScan">扫描</button>
+      </div>
+      <div v-if="formatPreset && state.scan" class="muted" style="margin-top: 4px">
+        已按「{{ formatLabel }}」筛选，其他格式（含 RAF/HEIC 等相机 RAW）不会进入评分
       </div>
       <div v-if="dirHistory.length" class="dir-history">
         <span class="muted">最近：</span>
@@ -80,6 +93,21 @@ import { state, api, toast, refreshState, refreshModels } from '../store.js'
 
 const loadingModels = ref(false)
 const picking = ref(false)
+const formatPreset = ref('')
+
+const PRESETS = {
+  '': [],
+  jpg: ['jpg', 'jpeg'],
+  png: ['png'],
+  webp: ['webp'],
+  web: ['jpg', 'jpeg', 'png', 'webp'],
+}
+const formatLabel = computed(() => ({ jpg: '仅 JPG', png: '仅 PNG', webp: '仅 WebP', web: 'JPG/PNG/WebP' }[formatPreset.value] || ''))
+const formatsArg = computed(() => PRESETS[formatPreset.value] || [])
+
+function rescanIfScanned() {
+  if (state.scan) doScan() // 已有扫描结果时切换格式立即重扫
+}
 
 // 弹出系统目录选择框（由本机服务端弹出），选完自动扫描
 async function pickDir() {
@@ -182,7 +210,7 @@ function statusLabel(s) {
 async function doScan() {
   if (!state.dir) return toast('请先输入目录', true)
   try {
-    const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir }) })
+    const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir, formats: formatsArg.value }) })
     const live = r.items.filter((i) => !i.dup).length
     const dupCount = r.items.length - live
     state.scan = { count: r.items.length, live, est_cost: r.est_cost, dupCount }
@@ -209,7 +237,7 @@ async function doStart(sample) {
     state.progress = []
     const r = await api('/api/start', {
       method: 'POST',
-      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0 }),
+      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value }),
     })
     state.session = r.session_id
     state.running = true

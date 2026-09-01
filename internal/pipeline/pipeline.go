@@ -104,10 +104,11 @@ func (b *Bus) Publish(ev Event) {
 
 // StartOpts 启动参数
 type StartOpts struct {
-	Dir      string `json:"dir"`
-	Model    string `json:"model"`     // 为空取配置默认
-	SampleN  int    `json:"sample_n"`  // 抽样试跑数量，0=全量
-	ForceNew bool   `json:"force_new"` // 强制新建会话（不续跑）
+	Dir      string   `json:"dir"`
+	Model    string   `json:"model"`     // 为空取配置默认
+	SampleN  int      `json:"sample_n"`  // 抽样试跑数量，0=全量
+	ForceNew bool     `json:"force_new"` // 强制新建会话（不续跑）
+	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
 }
 
 // Engine 流水线引擎
@@ -155,9 +156,18 @@ type ScanItem struct {
 	Dup      bool   `json:"dup"` // 批内重复
 }
 
-// Scan 扫描目录：过滤、按内容指纹去重；返回清单与预估费用
-func (e *Engine) Scan(dir string) ([]*ScanItem, float64, error) {
+// Scan 扫描目录：过滤、按内容指纹去重；返回清单与预估费用。
+// formats 为扩展名白名单（如 ["jpg","jpeg"]，不含点、小写；空=全部支持格式，
+// 不支持的格式 HEIC/RAW 等仍会登记为 unsupported）。
+func (e *Engine) Scan(dir string, formats []string) ([]*ScanItem, float64, error) {
 	cfg := e.cfgFn()
+	whitelist := map[string]bool{}
+	for _, f := range formats {
+		f = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(f), "."))
+		if f != "" {
+			whitelist[f] = true
+		}
+	}
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
 		return nil, 0, fmt.Errorf("目录不存在或不可读: %s", dir)
 	}
@@ -175,9 +185,16 @@ func (e *Engine) Scan(dir string) ([]*ScanItem, float64, error) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(info.Name()))
-		if !compress.SupportedExts[ext] && !compress.UnsupportedExts[ext] {
+		supported := compress.SupportedExts[ext]
+		unsupported := compress.UnsupportedExts[ext]
+		if !supported && !unsupported {
 			return nil
 		}
+		// 格式白名单：不在名单内的直接跳过（含不支持的 RAW/HEIC）
+		if len(whitelist) > 0 && !whitelist[strings.TrimPrefix(ext, ".")] {
+			return nil
+		}
+		// 未指定白名单时，不支持的格式仅登记标记（unsupported）
 		if strings.HasPrefix(info.Name(), "~$") || strings.HasSuffix(info.Name(), ".tmp") {
 			return nil
 		}
@@ -242,7 +259,7 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 		model = cfg.Model.Default
 	}
 
-	items, _, err := e.Scan(opts.Dir)
+	items, _, err := e.Scan(opts.Dir, opts.Formats)
 	if err != nil {
 		return "", err
 	}
