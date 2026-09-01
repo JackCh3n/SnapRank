@@ -103,7 +103,9 @@
     </div>
 
     <div class="row">
-      <button class="btn" :disabled="saving" @click="save">保存配置</button>
+      <button class="btn" :class="{ saved: saved }" :disabled="saving" @click="save()">
+        {{ saving ? '保存中…' : saved ? '✅ 已保存' : '保存配置' }}
+      </button>
       <span class="muted">保存后立即生效；模型切换在下一批次生效</span>
     </div>
 
@@ -156,7 +158,11 @@ async function testConn() {
   testing.value = false
 }
 
-async function save(silent = false) {
+const saved = ref(false)
+let savedTimer = null
+
+async function save(silent) {
+  silent = silent === true // @click 直接绑定时会误传 MouseEvent
   const c = cfg.value
   const body = {
     provider: { ...c.provider, api_key: c.provider.api_key || '' },
@@ -166,11 +172,20 @@ async function save(silent = false) {
     cost: { ...c.cost, prices: safeParse(pricesJson.value) },
     paths: { ...c.paths },
   }
-  cfg.value = await api('/api/config', { method: 'POST', body: JSON.stringify(body) })
-  cfg.value.provider.api_key = '' // 脱敏回显不回填输入框
-  visionPatterns.value = cfg.value.model.vision_patterns.join('\n')
-  pricesJson.value = JSON.stringify(cfg.value.cost.prices, null, 1)
-  if (!silent) toast('配置已保存')
+  saving.value = true
+  try {
+    cfg.value = await api('/api/config', { method: 'POST', body: JSON.stringify(body) })
+    cfg.value.provider.api_key = '' // 脱敏回显不回填输入框
+    visionPatterns.value = cfg.value.model.vision_patterns.join('\n')
+    pricesJson.value = JSON.stringify(cfg.value.cost.prices, null, 1)
+    saved.value = true
+    clearTimeout(savedTimer)
+    savedTimer = setTimeout(() => { saved.value = false }, 2500)
+    if (!silent) toast('✅ 配置已保存，立即生效')
+  } catch (e) {
+    toast('保存失败：' + e.message, true)
+  }
+  saving.value = false
 }
 
 function safeParse(s) {
@@ -193,6 +208,7 @@ onMounted(async () => {
 <style scoped>
 .grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .grow { flex: 1; min-width: 240px; }
+.btn.saved { background: #2f9e63; }
 .danger-zone { border: 1px solid var(--danger); }
 .danger-zone .title { color: var(--danger); }
 </style>
