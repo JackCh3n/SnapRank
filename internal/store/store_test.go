@@ -53,7 +53,7 @@ func TestSessionAndPhotoLifecycle(t *testing.T) {
 	if counts[StatusScored] != 1 {
 		t.Fatalf("状态计数不符: %v", counts)
 	}
-	list, total, _ := s.ListPhotos("s1", StatusScored, 0, 10)
+	list, total, _ := s.ListPhotos("s1", StatusScored, 0, 10, "score", "desc", "", "", -1, -1)
 	if total != 1 || len(list) != 1 {
 		t.Fatalf("分页查询不符: total=%d", total)
 	}

@@ -27,14 +27,14 @@
           </label>
           <label class="field">
             模型
-            <select v-model="modelFilter" @change="applySort()">
+            <select v-model="modelFilter" @change="load(1)">
               <option value="">全部</option>
               <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
             </select>
           </label>
           <label class="field">
             来源
-            <select v-model="sourceFilter" @change="applySort()">
+            <select v-model="sourceFilter" @change="load(1)">
               <option value="">全部</option>
               <option value="api">API</option>
               <option value="cache">缓存</option>
@@ -42,7 +42,7 @@
           </label>
           <label class="field">
             分数段
-            <select v-model="bandFilter" @change="applySort()">
+            <select v-model="bandFilter" @change="load(1)">
               <option value="">全部</option>
               <option value="high">高分（精选档）</option>
               <option value="mid">中分（良好档）</option>
@@ -57,7 +57,7 @@
           <button class="btn plain small" :disabled="page >= totalPages" @click="load(page + 1)">下一页</button>
         </div>
       </div>
-      <table class="list" v-if="sortedViewItems.length">
+      <table class="list" v-if="items.length">
         <thead>
           <tr>
             <th>缩略</th><th>文件名</th><th>状态</th>
@@ -70,7 +70,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in sortedViewItems" :key="p.id">
+          <tr v-for="p in items" :key="p.id">
             <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}`" class="mini clickable"
               loading="lazy" @click="preview = p" title="点击查看大图" /></td>
             <td class="clip" :title="p.src_path">{{ p.filename }}</td>
@@ -117,7 +117,6 @@ const sortKey = ref('')
 const sortAsc = ref(false)
 const preview = ref(null)
 const running = ref(false)
-const loadSortTick = ref(0)
 const modelFilter = ref('')
 const sourceFilter = ref('')
 const bandFilter = ref('')
@@ -149,15 +148,7 @@ const modelOptions = computed(() => {
   return [...set].sort()
 })
 
-// 过滤后的行（模型/来源为前端过滤；表格渲染与排序均基于它）
-const viewItems = computed(() => {
-  return items.value.filter((it) => {
-    if (modelFilter.value && (it.model || '') !== modelFilter.value) return false
-    if (sourceFilter.value && (it.source || '') !== sourceFilter.value) return false
-    if (bandFilter.value && bandOf(it) !== bandFilter.value) return false
-    return true
-  })
-})
+// 过滤与排序均在服务端完成（正确跨分页），前端只渲染 items
 
 function toggleSort(k) {
   if (sortKey.value === k) {
@@ -167,27 +158,13 @@ function toggleSort(k) {
     sortKey.value = k
     sortAsc.value = false // 默认降序（高分在前）
   }
-  applySort()
+  load(1) // 服务端排序，重置到第一页
 }
 
 function arrow(k) {
   if (sortKey.value !== k) return '↕'
   return sortAsc.value ? '↑' : '↓'
 }
-
-// 排序键（保持响应式：viewItems 渲染时按 sortKey/sortAsc 动态排序）
-const sortedViewItems = computed(() => {
-  if (!sortKey.value) return viewItems.value
-  const k = sortKey.value
-  const dir = sortAsc.value ? 1 : -1
-  return [...viewItems.value].sort((a, b) => {
-    const va = k === 'score' ? a.score : (a.dims ? a.dims[k] : -1)
-    const vb = k === 'score' ? b.score : (b.dims ? b.dims[k] : -1)
-    return (va - vb) * dir
-  })
-})
-
-function applySort() { /* sortedViewItems 为 computed，筛选/排序自动响应 */ }
 
 function closePreview() {
   preview.value = null
@@ -215,7 +192,12 @@ function d(p, k) {
 
 async function load(pg) {
   page.value = pg || page.value
-  const r = await api(`/api/photos?page=${page.value}&page_size=${pageSize}&status=${status.value}&session=${sessionID.value}`)
+  const qs = new URLSearchParams({
+    page: page.value, page_size: pageSize, status: status.value, session: sessionID.value,
+    sort: sortKey.value, order: sortAsc.value ? 'asc' : 'desc',
+    model: modelFilter.value, source: sourceFilter.value, band: bandFilter.value,
+  })
+  const r = await api(`/api/photos?${qs}`)
   items.value = r.items || []
   total.value = r.total || 0
 }

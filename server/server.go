@@ -93,6 +93,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"currentModel": s.core.GetCurrentModel(),
 		"running":      eng.IsRunning(),
 		"session":      eng.CurrentSession(),
+		"queue":        eng.QueueStatus(),
 		"summary":      sum,
 		"version":      Version,
 	})
@@ -262,7 +263,8 @@ func (s *Server) handlePhotos(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	size, _ := strconv.Atoi(q.Get("page_size"))
-	pp, err := s.core.ListPhotos(q.Get("session"), q.Get("status"), page, size)
+	pp, err := s.core.ListPhotos(q.Get("session"), q.Get("status"), page, size,
+		q.Get("sort"), q.Get("order"), q.Get("model"), q.Get("source"), q.Get("band"))
 	if err != nil {
 		writeErr(w, 500, err)
 		return
@@ -435,7 +437,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// 连接即推一次当前状态，避免前端漏听 stage
 	eng := s.core.Engine()
 	writeSSE(w, fl, pipeline.Event{Type: "state", Data: map[string]interface{}{
-		"running": eng.IsRunning(), "session": eng.CurrentSession(),
+		"running": eng.IsRunning(), "session": eng.CurrentSession(), "queue": eng.QueueStatus(),
 	}})
 
 	heartbeat := time.NewTicker(15 * time.Second)

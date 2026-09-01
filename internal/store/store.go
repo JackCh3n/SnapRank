@@ -381,19 +381,56 @@ func (s *Store) GetPhoto(id int64) (*Photo, error) {
 	return p, err
 }
 
-// ListPhotos 会话明细分页查询；status 为空时返回全部
-func (s *Store) ListPhotos(sessionID, status string, offset, limit int) ([]*Photo, int, error) {
+// 排序白名单：键 → SQL 表达式（dims 为 JSON，用 json_extract 取维度分）
+var sortExprs = map[string]string{
+	"score":       "score",
+	"technique":   "json_extract(dims, '$.technique')",
+	"composition": "json_extract(dims, '$.composition')",
+	"content":     "json_extract(dims, '$.content')",
+	"color":       "json_extract(dims, '$.color')",
+}
+
+// ListPhotos 会话明细分页查询；status 为空时返回全部；
+// sortKey 为空按 id，sortDir 为 asc/desc（默认 desc），NULL 维度排最后
+func (s *Store) ListPhotos(sessionID, status string, offset, limit int, sortKey, sortDir, model, source string, minScore, maxScore float64) ([]*Photo, int, error) {
 	where := `WHERE session_id=?`
 	args := []interface{}{sessionID}
 	if status != "" {
 		where += ` AND status=?`
 		args = append(args, status)
 	}
+	if model != "" {
+		where += ` AND model=?`
+		args = append(args, model)
+	}
+	if source != "" {
+		where += ` AND source=?`
+		args = append(args, source)
+	}
+	if minScore >= 0 {
+		where += ` AND score>=?`
+		args = append(args, minScore)
+	}
+	if maxScore >= 0 {
+		where += ` AND score<?`
+		args = append(args, maxScore)
+	}
+	switch sortKey {
+	case "score", "technique", "composition", "content", "color":
+		expr := sortExprs[sortKey]
+		dirSQL := "DESC"
+		if sortDir == "asc" {
+			dirSQL = "ASC"
+		}
+		where += fmt.Sprintf(` ORDER BY (%s) IS NULL, (%s) %s, id DESC`, expr, expr, dirSQL)
+	default:
+		where += ` ORDER BY id`
+	}
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos `+where+` ORDER BY id LIMIT ? OFFSET ?`,
+	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos `+where+` LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err

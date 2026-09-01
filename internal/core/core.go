@@ -271,8 +271,8 @@ type PhotoPage struct {
 	Items []*store.Photo `json:"items"`
 }
 
-// ListPhotos 明细分页查询（sessionID 为空取最近会话）
-func (c *Core) ListPhotos(sessionID, status string, page, pageSize int) (*PhotoPage, error) {
+// ListPhotos 明细分页查询（sessionID 为空取最近会话；排序与筛选全部在数据库层完成）
+func (c *Core) ListPhotos(sessionID, status string, page, pageSize int, sortKey, sortDir, model, source, band string) (*PhotoPage, error) {
 	if sessionID == "" {
 		sess, err := c.st.LastSession()
 		if err != nil {
@@ -286,7 +286,24 @@ func (c *Core) ListPhotos(sessionID, status string, page, pageSize int) (*PhotoP
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 50
 	}
-	items, total, err := c.st.ListPhotos(sessionID, status, (page-1)*pageSize, pageSize)
+	// 分数段 → 分数区间（跟随配置阈值；分档只对已评分记录有意义）
+	minScore, maxScore := -1.0, -1.0
+	if band != "" {
+		th := c.snapshotConfig().Score.Thresholds
+		switch band {
+		case "high":
+			minScore = th[0]
+		case "mid":
+			minScore, maxScore = th[1], th[0]
+		case "low":
+			maxScore = th[1]
+		}
+		if status == "" {
+			status = store.StatusScored
+		}
+	}
+	items, total, err := c.st.ListPhotos(sessionID, status, (page-1)*pageSize, pageSize,
+		sortKey, sortDir, model, source, minScore, maxScore)
 	if err != nil {
 		return nil, err
 	}

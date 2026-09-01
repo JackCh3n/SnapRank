@@ -111,6 +111,13 @@ type StartOpts struct {
 	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
 }
 
+// queuedTask 排队中的任务
+type queuedTask struct {
+	sessID string
+	opts   StartOpts
+	model  string
+}
+
 // Engine 流水线引擎
 type Engine struct {
 	cfgFn func() *config.Config // 每次读取最新配置（设置热更新）
@@ -122,6 +129,7 @@ type Engine struct {
 	sessionID string
 	concScale atomic.Int64 // 429 降速倍率（1=正常，越大退避越久）
 	mu        sync.Mutex
+	queued    []queuedTask // 排队任务（当前任务结束后顺序执行）
 }
 
 // New 构造引擎
@@ -242,11 +250,9 @@ func (e *Engine) estCost(model string) float64 {
 
 // ---------- 启动与执行 ----------
 
-// Start 校验并启动阶段一（压缩+评分）。校验同步返回错误，执行异步进行。
+// Start 校验并创建评分任务；已有任务运行时自动排队（顺序执行）。
+// 校验同步返回错误，执行异步进行。
 func (e *Engine) Start(opts StartOpts) (string, error) {
-	if e.IsRunning() {
-		return "", errors.New("已有任务在运行中")
-	}
 	cfg := e.cfgFn()
 	if opts.Dir == "" {
 		return "", errors.New("缺少源图目录")
@@ -323,10 +329,57 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 		}
 	}
 
-	if err := e.startAsync(sessID, opts, model, live); err != nil {
-		return "", err
-	}
+	e.enqueue(sessID, opts, model)
 	return sessID, nil
+}
+
+// enqueue 任务入队；空闲则立即启动
+func (e *Engine) enqueue(sessID string, opts StartOpts, model string) {
+	e.mu.Lock()
+	e.queued = append(e.queued, queuedTask{sessID: sessID, opts: opts, model: model})
+	busy := e.running.Load()
+	e.mu.Unlock()
+	e.publishQueue()
+	if !busy {
+		e.popAndRun()
+	}
+}
+
+// popAndRun 取出下一个排队任务执行（顺序执行，同时只跑一个）
+func (e *Engine) popAndRun() {
+	e.mu.Lock()
+	if e.running.Load() || len(e.queued) == 0 {
+		e.mu.Unlock()
+		return
+	}
+	t := e.queued[0]
+	e.queued = e.queued[1:]
+	e.mu.Unlock()
+	logutil.Info("任务开始: %s（剩余排队 %d）", t.sessID, len(e.queued))
+	e.startAsync(t.sessID, t.opts, t.model)
+}
+
+// QueueStatus 当前运行与排队中的任务
+func (e *Engine) QueueStatus() map[string]interface{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ids := make([]string, 0, len(e.queued))
+	for _, t := range e.queued {
+		ids = append(ids, t.sessID)
+	}
+	return map[string]interface{}{"current": e.sessionID, "queued": ids}
+}
+
+func (e *Engine) publishQueue() {
+	e.Bus.Publish(Event{Type: "queue", Data: e.QueueStatus()})
+}
+
+// ClearQueue 清空排队任务（清空数据时用）
+func (e *Engine) ClearQueue() {
+	e.mu.Lock()
+	e.queued = nil
+	e.mu.Unlock()
+	e.publishQueue()
 }
 
 // resetIfChanged 文件内容与库中指纹不一致时重置为待处理
@@ -344,9 +397,6 @@ func (e *Engine) resetIfChanged(id int64, curFP string) {
 // Rescore 复检重评：把指定照片重置为待处理并立即重跑（走当前所选模型），
 // 已有压缩缓存命中即跳过压缩，0 重复压缩；forceCost=true 时忽略跨会话评分缓存强制重调 API。
 func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
-	if e.IsRunning() {
-		return "", errors.New("已有任务在运行中")
-	}
 	if len(ids) == 0 {
 		return "", errors.New("未选择要重评的照片")
 	}
@@ -378,23 +428,18 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 	if model == "" {
 		model = cfg.Model.Default
 	}
-	if err := e.startAsync(sess.ID, StartOpts{Dir: sess.SourceDir}, model, n); err != nil {
-		return "", err
-	}
-	logutil.Info("复检重评 %d 张（会话 %s，强制重调=%v）", n, sess.ID, forceCost)
+	e.enqueue(sess.ID, StartOpts{Dir: sess.SourceDir}, model)
+	logutil.Info("复检重评 %d 张入队（会话 %s，强制重调=%v）", n, sess.ID, forceCost)
 	return sess.ID, nil
 }
 
 // RescoreParseFail 一键重评当前会话全部解析失败的照片
 func (e *Engine) RescoreParseFail() (string, int, error) {
-	if e.IsRunning() {
-		return "", 0, errors.New("已有任务在运行中")
-	}
 	sess, err := e.store.LastSession()
 	if err != nil {
 		return "", 0, errors.New("暂无会话")
 	}
-	photos, _, err := e.store.ListPhotos(sess.ID, store.StatusParseFail, 0, 1<<20)
+	photos, _, err := e.store.ListPhotos(sess.ID, store.StatusParseFail, 0, 1<<20, "", "", "", "", -1, -1)
 	if err != nil {
 		return "", 0, err
 	}
@@ -440,7 +485,7 @@ func randomSuffix() string {
 }
 
 // startAsync 启动后台执行
-func (e *Engine) startAsync(sessID string, opts StartOpts, model string, totalLive int) error {
+func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.mu.Lock()
 	e.cancel = cancel
@@ -448,10 +493,11 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string, totalLi
 	e.mu.Unlock()
 	e.running.Store(true)
 	e.concScale.Store(1)
+	e.publishQueue()
 
 	go func() {
 		defer e.running.Store(false)
-		stopped := e.run(ctx, sessID, opts, model, totalLive)
+		stopped := e.run(ctx, sessID, opts, model)
 		status := store.SessionCompleted
 		if stopped {
 			status = store.SessionStopped
@@ -466,12 +512,14 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string, totalLi
 			e.store.SpendAdd(time.Now().Format("2006-01-02"), model, scored, c*float64(scored))
 		}
 		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: counts[store.StatusFailed]}})
+		// 当前任务结束：拉起下一个排队任务
+		e.publishQueue()
+		e.popAndRun()
 	}()
-	return nil
 }
 
 // run 执行压缩与评分（单工作池：内联压缩缓存命中即跳过），返回是否被停止
-func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model string, totalLive int) bool {
+func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model string) bool {
 	cfg := e.cfgFn()
 	prov, err := provider.New(cfg)
 	if err != nil {
@@ -486,7 +534,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		return false
 	}
 
-	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20)
+	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20, "", "", "", "", -1, -1)
 	if err != nil {
 		logutil.Error("读取清单失败: %v", err)
 		return false

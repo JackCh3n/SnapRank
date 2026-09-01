@@ -7,17 +7,29 @@ export const state = reactive({
   version: '',
   config: null,
   currentModel: '',
-  running: false,
-  session: '',
+  running: false,              // 是否有正在执行的任务
+  session: '',                 // 当前运行中的会话
+  queue: { current: '', queued: [] }, // 任务队列（current=运行中，queued=排队）
   summary: null,
   models: { all: [], vision: [] },
-  progress: [],               // 最近评分进度（{file, score, status, error}）
-  stage: null,                // {stage, total}
-  scan: null,                 // {count, est_cost, items}
-  dir: '',                    // 运行页输入的源图目录（跨页面保留）
-  selModel: '',               // 运行页选中的模型（跨页面保留）
+  tasks: {},                   // sid -> { progress: [], total: 0, stage: '', startedAt: 0, finished: false }
+  scan: null,                  // {count, est_cost, items}
+  dir: '',                     // 运行页输入的源图目录（跨页面保留）
+  selModel: '',                // 运行页选中的模型（跨页面保留）
+  formatPreset: '',            // 运行页格式筛选（跨页面保留）
   toast: null,
 })
+
+const FINAL = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
+
+// 获取（或初始化）某任务的进度容器
+export function taskOf(sid) {
+  if (!sid) return null
+  if (!state.tasks[sid]) {
+    state.tasks[sid] = { progress: [], total: 0, stage: '', startedAt: 0, finished: false }
+  }
+  return state.tasks[sid]
+}
 
 let toastTimer = null
 export function toast(msg, isErr = false) {
@@ -43,6 +55,11 @@ export function applyState(s) {
   state.currentModel = s.currentModel || ''
   state.running = s.running
   state.session = s.session || ''
+  if (s.queue) {
+    state.queue = s.queue
+    if (s.queue.current) { state.session = s.queue.current; taskOf(s.queue.current) }
+    for (const q of s.queue.queued || []) taskOf(q)
+  }
   if (s.summary !== undefined) state.summary = s.summary
 }
 
@@ -66,35 +83,51 @@ export function setTheme(t) {
   document.documentElement.classList.toggle('dark', t === 'dark')
 }
 
-// SSE 实时进度
+// SSE 实时进度（多任务：按 session_id 归档到各自的任务容器）
 export function connectSSE() {
   const es = new EventSource('/api/events')
   es.addEventListener('state', (e) => {
     const d = JSON.parse(e.data)
     state.running = d.running
     if (d.session) state.session = d.session
+    if (d.queue) {
+      state.queue = d.queue
+      if (d.queue.current) taskOf(d.queue.current)
+    }
+  })
+  es.addEventListener('queue', (e) => {
+    state.queue = JSON.parse(e.data)
+    state.running = !!state.queue.current
+    if (state.queue.current) state.session = state.queue.current
   })
   es.addEventListener('stage', (e) => {
-    state.stage = JSON.parse(e.data)
+    const d = JSON.parse(e.data)
+    const t = taskOf(d.session_id)
+    if (!t) return
+    t.total = d.total
+    t.stage = d.stage
+    if (!t.startedAt) t.startedAt = Date.now()
   })
   es.addEventListener('progress', (e) => {
-    const p = JSON.parse(e.data)
-    state.progress.unshift(p)
-    if (state.progress.length > 100) state.progress.pop()
+    const d = JSON.parse(e.data)
+    const t = taskOf(d.session_id)
+    if (!t) return
+    if (!t.startedAt) t.startedAt = Date.now()
+    t.progress.push({ ...d, _ts: Date.now() })
+    if (t.progress.length > 400) t.progress.splice(0, t.progress.length - 400)
+  })
+  es.addEventListener('done', (e) => {
+    const d = JSON.parse(e.data)
+    const t = taskOf(d.session_id)
+    if (t) t.finished = true
+    refreshState()
+    if (d.stopped) toast(`任务 ${d.session_id} 已停止`)
   })
   es.addEventListener('error', (e) => {
     if (e.data) {
       const d = JSON.parse(e.data)
       toast(d.error || '流水线错误', true)
     }
-  })
-  es.addEventListener('done', async (e) => {
-    const d = JSON.parse(e.data)
-    state.running = false
-    state.stage = null
-    await refreshState()
-    if (d.stopped) toast('任务已停止')
-    else toast(`评分完成（失败 ${d.failed} 张），请到「复核归档」查看`)
   })
   es.onerror = () => { /* 断线时浏览器自动重连 */ }
 }
