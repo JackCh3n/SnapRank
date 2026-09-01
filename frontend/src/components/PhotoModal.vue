@@ -56,8 +56,29 @@
           </div>
         </div>
 
+        <!-- 复检进行中：进度态 -->
+        <div v-if="rescoring" class="pm-rescore">
+          <div class="pm-rescore-head">
+            <span class="pm-spinner"></span>
+            <b>复检重评中…</b>
+            <span class="pm-rescore-sub">{{ rescorePhase }}</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill pm-rescore-fill" :style="{ width: rescorePct + '%' }"></div></div>
+          <div v-if="rescoreResult" class="pm-rescore-result" :class="rescoreResult.ok ? 'ok' : 'err'">
+            <template v-if="rescoreResult.ok">
+              ✓ 复检成功：新总分 <b>{{ rescoreResult.score.toFixed(1) }}</b>
+              <span v-if="rescoreResult.dims">（技术 {{ rescoreResult.dims.technique.toFixed(1) }} / 构图 {{ rescoreResult.dims.composition.toFixed(1) }} / 内容 {{ rescoreResult.dims.content.toFixed(1) }} / 色彩 {{ rescoreResult.dims.color.toFixed(1) }}）</span>
+            </template>
+            <template v-else>
+              ✗ 复检失败：{{ rescoreResult.error }}
+              <div class="pm-err-detail" v-if="rescoreResult.detail">{{ rescoreResult.detail }}</div>
+              <div class="pm-rescore-hint">可关闭弹窗后再次点击「↻ 复检重评」重试</div>
+            </template>
+          </div>
+        </div>
+
         <!-- 操作区 -->
-        <div class="pm-actions">
+        <div v-else class="pm-actions">
           <button class="btn small" :disabled="sharing" @click="copyShareCard">
             {{ sharing ? '生成中…' : copyHint }}
           </button>
@@ -65,7 +86,7 @@
             :download="`SnapRank_${(p.filename || 'photo').replace(/\.[^.]+$/, '')}.png`">下载卡片</a>
           <span class="pm-flex"></span>
           <button v-if="canRescore" class="btn plain small" :disabled="busy"
-            title="重新调用 AI 评分（忽略缓存）" @click="$emit('rescore', p)">↻ 复检重评</button>
+            title="重新调用 AI 评分（忽略缓存）" @click="startRescore">↻ 复检重评</button>
           <button class="btn plain small" @click="$emit('close')">关闭</button>
         </div>
       </div>
@@ -75,7 +96,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { state, toast } from '../store.js'
+import { state, toast, api } from '../store.js'
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -125,7 +146,93 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 watch(() => p.value && p.value.id, () => {
   shareUrl.value = ''
   copyHint.value = '📋 复制分享卡片'
+  resetRescore()
 })
+
+// ---------- 复检进度 ----------
+const rescoring = ref(false)
+const rescorePhase = ref('')
+const rescorePct = ref(8)
+const rescoreResult = ref(null)   // {ok, score, dims} | {ok:false, error, detail}
+let rescoreEs = null
+
+function resetRescore() {
+  rescoring.value = false
+  rescorePhase.value = ''
+  rescorePct.value = 8
+  rescoreResult.value = null
+  if (rescoreEs) { rescoreEs.close(); rescoreEs = null }
+}
+
+// 慢速爬升的伪进度（真实结果以 SSE 为准）
+function startFakeProgress() {
+  const timer = setInterval(() => {
+    if (!rescoring.value) { clearInterval(timer); return }
+    if (rescorePct.value < 90) rescorePct.value += Math.max(1, (92 - rescorePct.value) * 0.06)
+  }, 500)
+}
+
+async function startRescore() {
+  if (rescoring.value) return
+  rescoring.value = true
+  rescoreResult.value = null
+  rescorePhase.value = '提交复检请求…'
+  rescorePct.value = 8
+  try {
+    await api('/api/rescore', {
+      method: 'POST',
+      body: JSON.stringify({ ids: [p.value.id], force: true }),
+    })
+  } catch (e) {
+    rescoring.value = false
+    rescoreResult.value = { ok: false, error: e.message }
+    return
+  }
+  rescorePhase.value = '等待 AI 重新评分…'
+  startFakeProgress()
+  // SSE 跟踪这张照片的重评进度（progress 事件按文件名匹配）
+  rescoreEs = new EventSource('/api/events')
+  const name = p.value.filename
+  rescoreEs.addEventListener('progress', (e) => {
+    try {
+      const d = JSON.parse(e.data)
+      if (d.file !== name || d.session_id !== d.session_id) return
+      if (d.status === 'scored') {
+        rescorePct.value = 100
+        rescorePhase.value = '完成'
+        rescoreResult.value = { ok: true, score: d.score }
+        // 拉取完整明细（维度分）
+        api(`/api/photo?id=${p.value.id}`).then((np) => {
+          if (rescoreResult.value && rescoreResult.value.ok && np.dims) {
+            rescoreResult.value.dims = np.dims
+            // 弹窗照片数据同步为新结果
+            Object.assign(p.value, np)
+          }
+        }).catch(() => {})
+        finishRescore()
+      } else if (d.status === 'parse_fail' || d.status === 'failed') {
+        rescorePct.value = 100
+        rescorePhase.value = '失败'
+        rescoreResult.value = { ok: false, error: statusText(d.status), detail: d.error || '' }
+        finishRescore()
+      }
+    } catch { /* 忽略解析错误 */ }
+  })
+  rescoreEs.addEventListener('error', () => { /* 断线由浏览器重连 */ })
+}
+
+function finishRescore() {
+  setTimeout(() => {
+    if (rescoreEs) { rescoreEs.close(); rescoreEs = null }
+    rescoring.value = false
+  }, 2500) // 结果停留 2.5s 后回到操作区
+}
+
+function statusText(s) {
+  return { parse_fail: '评分解析失败（模型未返回有效维度分）', failed: '模型调用失败' }[s] || s
+}
+
+onBeforeUnmount(() => { if (rescoreEs) rescoreEs.close() })
 
 // ---------- 分享卡片 ----------
 function loadImg(src, timeoutMs = 8000) {
@@ -319,5 +426,20 @@ async function copyShareCard() {
 .pm-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
 .pm-actions { display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 14px; }
+
+.pm-rescore { border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.pm-rescore-head { display: flex; align-items: center; gap: 10px; }
+.pm-rescore-sub { color: var(--text-2); font-size: 13px; }
+.pm-spinner {
+  width: 16px; height: 16px; border-radius: 50%; flex: none;
+  border: 2px solid var(--accent); border-top-color: transparent;
+  animation: pm-spin 0.8s linear infinite;
+}
+@keyframes pm-spin { to { transform: rotate(360deg); } }
+.pm-rescore-fill { transition: width 0.5s; }
+.pm-rescore-result { font-size: 13px; line-height: 1.6; border-radius: 8px; padding: 10px 12px; }
+.pm-rescore-result.ok { background: var(--accent-weak); color: var(--accent); }
+.pm-rescore-result.err { background: rgba(250, 81, 81, 0.08); color: var(--danger); }
+.pm-rescore-hint { color: var(--text-2); font-size: 12px; margin-top: 4px; }
 .pm-flex { flex: 1; }
 </style>

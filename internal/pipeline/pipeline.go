@@ -605,15 +605,31 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 
 	dims, tags, strength, weakness, clamped, perr := scorer.Parse(content)
 	if perr != nil {
-		// 解析失败不伪造分数：标记待复检，不参与正常分档
+		// 解析失败不伪造分数：标记待复检，并把模型原始输出片段存入 error 便于排查
+		frag := summarizeContent(content, 220)
+		if strings.TrimSpace(content) == "" {
+			frag = "（模型返回了空内容——可能是安全拦截、max_tokens 截断或平台异常，可更换模型重试）"
+		}
+		detail := fmt.Sprintf("%s ｜ 模型输出片段: %s", perr.Error(), frag)
 		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", model, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
-		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(perr.Error(), 200))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(perr.Error(), 120)}
+		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(detail, 500))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(detail, 200)}
 	}
 	score := scorer.WeightedScore(dims, cfg.WeightsNormalized())
 	e.store.SetPhotoResult(p.ID, store.StatusScored, score, &dims, tags, strength, weakness, model, scorer.PromptVersion, "api", clamped, time.Since(start).Milliseconds())
 	e.store.CachePut(p.Fingerprint, model, scorer.PromptVersion, dims, tags, strength, weakness)
 	return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored}
+}
+
+// summarizeContent 压缩模型原始输出为单行片段（去换行/代码块标记），用于失败详情展示
+func summarizeContent(s string, n int) string {
+	s = strings.ReplaceAll(s, "```", "'")
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func readB64(path string) (string, error) {

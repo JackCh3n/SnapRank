@@ -66,8 +66,8 @@
             <select class="bucket-sel" :value="p.override_bucket || autoBucket(p)" @change="setBucket(p, $event.target.value)">
               <option v-for="b in bucketNames" :key="b" :value="b">{{ b }}</option>
             </select>
-            <button class="btn plain small" :disabled="state.running" title="重新调用 AI 评分（忽略缓存，约 1 次调用费用）"
-              @click="onRescore(p)">↻ 复检</button>
+            <button class="btn plain small" :disabled="state.running" title="查看详情并复检"
+              @click="preview = p">↻ 复检</button>
           </div>
         </div>
       </div>
@@ -104,7 +104,7 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="state.running"
-      @close="preview = null" @rescore="onRescore" />
+      @close="closePreview" />
   </div>
 </template>
 
@@ -149,14 +149,10 @@ const parseFailCount = computed(() => {
   return (s && s.status && s.status.parse_fail) || 0
 })
 
-async function onRescore(p) {
-  try {
-    await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
-    toast(`已提交复检：${p.filename}，完成后自动刷新`)
-    preview.value = null
-  } catch (e) {
-    toast(e.message, true)
-  }
+function closePreview() {
+  preview.value = null
+  // 复检可能已改变评分，关闭时刷新汇总
+  api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
 }
 
 async function rescoreAllParseFail() {

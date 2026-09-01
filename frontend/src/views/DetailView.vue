@@ -67,7 +67,7 @@
             <td class="clip">{{ p.updated_at }}</td>
             <td class="clip" :title="p.error">{{ p.error || p.weakness }}</td>
             <td><button v-if="p.status === 'parse_fail' || p.status === 'failed'" class="btn plain small"
-              :disabled="running" @click="onRescore(p)">↻ 复检</button></td>
+              :disabled="running" title="查看详情并复检" @click="preview = p">↻ 复检</button></td>
           </tr>
         </tbody>
       </table>
@@ -76,7 +76,7 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="running"
-      @close="preview = null" @rescore="onRescore" />
+      @close="closePreview" />
   </div>
 </template>
 
@@ -144,17 +144,9 @@ const sortedViewItems = computed(() => {
 
 function applySort() { /* sortedViewItems 为 computed，筛选/排序自动响应 */ }
 
-async function onRescore(p) {
-  running.value = true
-  try {
-    await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
-    toast(`已提交复检：${p.filename}，完成后自动刷新`)
-    preview.value = null
-    setTimeout(() => load(), 2500) // 复检完成后刷新明细
-  } catch (e) {
-    toast(e.message, true)
-  }
-  running.value = false
+function closePreview() {
+  preview.value = null
+  load() // 复检可能已改变状态，关闭时刷新
 }
 
 
