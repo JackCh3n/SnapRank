@@ -413,57 +413,42 @@ var orderClauses = map[string]string{
 	"color:asc":        "ORDER BY (json_extract(dims, '$.color')) IS NULL, (json_extract(dims, '$.color')) ASC, id DESC",
 }
 
-// 查询语句全部为常量（init 时由常量生成），可选筛选通过参数短路：(? = ” OR col = ?)
-var (
-	listPhotosSQL      map[string]string
-	listPhotosCountSQL string
-)
-
-func init() {
-	const base = `SELECT ` + photoCols + ` FROM photos
-WHERE session_id = ?
-  AND (? = '' OR status = ?)
-  AND (? = '' OR model = ?)
-  AND (? = '' OR source = ?)
-  AND (? < 0 OR score >= ?)
-  AND (? < 0 OR score < ?)
-`
-	const countBase = `SELECT COUNT(*) FROM photos
-WHERE session_id = ?
-  AND (? = '' OR status = ?)
-  AND (? = '' OR model = ?)
-  AND (? = '' OR source = ?)
-  AND (? < 0 OR score >= ?)
-  AND (? < 0 OR score < ?)
-`
-	listPhotosSQL = map[string]string{}
-	for k, clause := range orderClauses {
-		listPhotosSQL[k] = base + clause
-	}
-	listPhotosSQL[""] = base + "ORDER BY id"
-	listPhotosCountSQL = countBase + "ORDER BY id"
-}
-
-// ListPhotos 会话明细分页查询；status/model/source 为空、minScore/maxScore<0 时
-// 对应条件被参数短路跳过；sortKey:sortDir 组合必须命中常量子句映射
+// ListPhotos 会话明细分页查询；status 为空时返回全部；
+// sortKey 为空按 id，sortDir 为 asc/desc（默认 desc），NULL 维度排最后
 func (s *Store) ListPhotos(sessionID, status string, offset, limit int, sortKey, sortDir, model, source string, minScore, maxScore float64) ([]*Photo, int, error) {
-	sqlText, ok := listPhotosSQL[sortKey+":"+sortDir]
-	if !ok {
-		sqlText = listPhotosSQL[""]
+	where := `WHERE session_id=?`
+	args := []interface{}{sessionID}
+	if status != "" {
+		where += ` AND status=?`
+		args = append(args, status)
 	}
-	args := []interface{}{
-		sessionID,
-		status, status,
-		model, model,
-		source, source,
-		minScore, minScore,
-		maxScore, maxScore,
+	if model != "" {
+		where += ` AND model=?`
+		args = append(args, model)
+	}
+	if source != "" {
+		where += ` AND source=?`
+		args = append(args, source)
+	}
+	if minScore >= 0 {
+		where += ` AND score>=?`
+		args = append(args, minScore)
+	}
+	if maxScore >= 0 {
+		where += ` AND score<?`
+		args = append(args, maxScore)
+	}
+	if clause, ok := orderClauses[sortKey+":"+sortDir]; ok {
+		where += " " + clause
+	} else {
+		where += ` ORDER BY id`
 	}
 	var total int
-	if err := s.db.QueryRow(listPhotosCountSQL, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM photos `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.db.Query(sqlText, append(args, limit, offset)...)
+	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos `+where+` LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
 	}

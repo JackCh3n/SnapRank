@@ -29,7 +29,7 @@
       <div v-if="dirHistory.length" class="dir-history">
         <span class="muted">最近：</span>
         <span v-for="d in dirHistory" :key="d" class="dir-chip" @click="useDir(d)" :title="d">
-          {{ shortDir(d) }}
+          <span class="chip-text">{{ shortDir(d) }}</span>
           <span class="chip-x" @click.stop="removeDir(d)" title="删除该标签">×</span>
         </span>
       </div>
@@ -37,6 +37,17 @@
         共 {{ state.scan.count }} 张（批内去重后 {{ state.scan.live }} 张需评分），预估费用
         <b>¥{{ state.scan.est_cost.toFixed(3) }}</b>
         <span v-if="state.scan.dupCount > 0">（重复 {{ state.scan.dupCount }} 张跳过）</span>
+      </div>
+      <div v-if="importedPreviews.length" class="import-preview">
+        <div class="muted" style="margin-bottom: 4px">
+          📥 本次导入任务（{{ importedPreviews.length }} 张，已归类为一个任务；再次贴入/拖入会自动追加）：
+        </div>
+        <div class="pv-grid">
+          <div v-for="(pv, i) in importedPreviews" :key="i" class="pv-item" :title="pv.name">
+            <img :src="pv.url" />
+          </div>
+          <div v-if="previewMore > 0" class="pv-item pv-more">+{{ previewMore }}</div>
+        </div>
       </div>
       <div class="muted" style="margin-top: 8px">
         也可以把照片或文件夹<b>直接拖入本页面</b>，或对截图/照片 <b>Ctrl+V 粘贴</b>——
@@ -267,16 +278,19 @@ const importing = ref(false)
 const importDone = ref(0)
 const importTotal = ref(0)
 const dragOver = ref(false)
+const importedPreviews = ref([])
+const previewMore = computed(() => Math.max(0, importedPreviews.value.length - 30))
 
 async function doScan() {
   if (!state.dir) return toast('请先输入目录', true)
   scanning.value = true
   try {
     const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir, formats: formatsArg.value }) })
-    const live = r.items.filter((i) => !i.dup).length
-    const dupCount = r.items.length - live
-    state.scan = { count: r.items.length, live, est_cost: r.est_cost, dupCount }
-    toast(`扫描完成：共 ${r.items.length} 张`)
+    const items = r.items || []
+    const live = items.filter((i) => !i.dup).length
+    const dupCount = items.length - live
+    state.scan = { count: items.length, live, est_cost: r.est_cost, dupCount }
+    toast(items.length ? `扫描完成：共 ${items.length} 张` : '扫描完成：未发现可处理的图片（可能过小或格式不符）')
     refreshState() // 拉取最新目录历史
   } catch (e) {
     state.scan = null
@@ -337,10 +351,17 @@ async function importFiles(files) {
       importDone.value++
     }
     fd.append('paths', JSON.stringify(paths))
+    if (state.importDir) fd.append('dir', state.importDir) // 追加到当前导入任务
     const r = await fetch('/api/import', { method: 'POST', body: fd }).then((x) => x.json())
     if (r.error) throw new Error(r.error)
+    state.importDir = r.dir
     state.dir = r.dir
-    toast(`已导入 ${r.count} 张到导入目录，开始扫描`)
+    // 预览（本地对象 URL，上限 30 张缩略展示）
+    for (const f of files) {
+      if (importedPreviews.value.length >= 30) break
+      importedPreviews.value.push({ url: URL.createObjectURL(f), name: f._rel || f.name })
+    }
+    toast(`已导入 ${r.count} 张到导入任务，开始扫描`)
     await doScan()
   } catch (e) {
     toast('导入失败：' + e.message, true)
@@ -390,6 +411,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('dragover', onDragOver)
   window.removeEventListener('dragleave', onDragLeave)
   window.removeEventListener('drop', onDrop)
+  for (const pv of importedPreviews.value) URL.revokeObjectURL(pv.url)
 })
 
 async function loadModels() {
@@ -473,8 +495,18 @@ onMounted(async () => {
 .dir-chip {
   display: inline-flex; align-items: center; gap: 4px;
   background: var(--card-2); border: 1px solid var(--line); border-radius: 999px;
-  padding: 2px 10px; font-size: 12px; cursor: pointer; max-width: 260px;
+  padding: 2px 4px 2px 10px; font-size: 12px; cursor: pointer; max-width: 260px;
 }
+.chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.chip-x { flex: none; }
+.import-preview { margin-top: 10px; }
+.pv-grid { display: flex; gap: 6px; flex-wrap: wrap; }
+.pv-item {
+  width: 72px; height: 54px; border-radius: 6px; overflow: hidden;
+  background: var(--card-2); display: flex; align-items: center; justify-content: center;
+}
+.pv-item img { width: 100%; height: 100%; object-fit: cover; }
+.pv-more { color: var(--text-2); font-size: 12px; }
 .dir-chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip-x { color: var(--text-2); font-size: 13px; padding: 0 1px; }
 .chip-x:hover { color: var(--danger); }

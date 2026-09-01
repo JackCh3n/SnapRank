@@ -24,9 +24,9 @@
         </div>
       </div>
       <div v-else class="muted">暂无评分结果：请先到「运行」页完成一次评分</div>
-      <div class="row" style="margin-top: 10px" v-if="parseFailCount > 0">
-        <button class="btn plain" :disabled="state.running" @click="rescoreAllParseFail">
-          ↻ 一键重评全部待复检（{{ parseFailCount }} 张）
+      <div class="row" style="margin-top: 10px" v-if="failTotal > 0">
+        <button class="btn plain" :disabled="state.running" @click="rescoreAllFailed">
+          ↻ 一键重试全部失败（{{ failTotal }} 张{{ failDetail }}）
         </button>
         <span class="muted">重新调用 AI 评分（忽略缓存），成功后自动回到对应分数档</span>
       </div>
@@ -199,6 +199,17 @@ const parseFailCount = computed(() => {
   const s = summary.value
   return (s && s.status && s.status.parse_fail) || 0
 })
+const failedCount = computed(() => {
+  const s = summary.value
+  return (s && s.status && s.status.failed) || 0
+})
+const failTotal = computed(() => parseFailCount.value + failedCount.value)
+const failDetail = computed(() => {
+  const p = parseFailCount.value, f = failedCount.value
+  if (p && f) return `解析失败 ${p} · 调用失败 ${f}`
+  if (p) return '解析失败'
+  return '调用失败'
+})
 
 function closePreview() {
   preview.value = null
@@ -206,10 +217,11 @@ function closePreview() {
   api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
 }
 
-async function rescoreAllParseFail() {
+async function rescoreAllFailed() {
   try {
     const r = await api('/api/rescore', { method: 'POST', body: JSON.stringify({ all: true }) })
-    toast(`已提交 ${r.count} 张复检重评`)
+    toast(`已提交 ${r.count} 张失败重试`)
+    setTimeout(() => { onSessionChange() }, 1500) // 重试完成后刷新
   } catch (e) {
     toast(e.message, true)
   }
