@@ -9,6 +9,13 @@
         </label>
         <button class="btn plain" :disabled="state.running" @click="doScan">扫描</button>
       </div>
+      <div v-if="dirHistory.length" class="dir-history">
+        <span class="muted">最近：</span>
+        <span v-for="d in dirHistory" :key="d" class="dir-chip" @click="useDir(d)" :title="d">
+          {{ shortDir(d) }}
+          <span class="chip-x" @click.stop="removeDir(d)" title="删除该标签">×</span>
+        </span>
+      </div>
       <div v-if="state.scan" class="muted" style="margin-top: 8px">
         共 {{ state.scan.count }} 张（批内去重后 {{ state.scan.live }} 张需评分），预估费用
         <b>¥{{ state.scan.est_cost.toFixed(3) }}</b>
@@ -44,10 +51,12 @@
     </div>
 
     <div class="card" v-if="state.running || state.progress.length">
-      <h3 class="title">③ 进度 {{ doneCount }}/{{ totalStr }}</h3>
+      <h3 class="title">③ 进度 {{ doneCount }}/{{ totalStr }}
+        <span class="eta" v-if="etaText">{{ etaText }}</span>
+      </h3>
       <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
       <div class="muted" style="margin: 6px 0 10px">
-        {{ state.stage ? `阶段：${state.stage.stage === 'score' ? '压缩+评分' : state.stage.stage}` : '' }}
+        {{ stageLabel }}<span v-if="elapsedText"> · 已用时 {{ elapsedText }}</span>
       </div>
       <div class="feed">
         <div v-for="(p, i) in state.progress" :key="i" class="feed-item">
@@ -64,16 +73,85 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { state, api, toast, refreshState, refreshModels } from '../store.js'
 
 const loadingModels = ref(false)
+const dirHistory = computed(() => (state.config && state.config.dir_history) || [])
+
+function shortDir(d) {
+  const parts = d.split(/[\/]+/).filter(Boolean)
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : d
+}
+function useDir(d) {
+  state.dir = d
+  doScan()
+}
+async function removeDir(d) {
+  try {
+    await api('/api/dir-history/remove', { method: 'POST', body: JSON.stringify({ dir: d }) })
+    const r = await api('/api/state')
+    state.config = r.config
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 
 const doneCount = computed(() => state.progress.length)
 const totalStr = computed(() => (state.stage && state.stage.total) || state.progress.length || '?')
 const pct = computed(() => {
   const t = (state.stage && state.stage.total) || 0
   return t ? Math.min(100, (state.progress.length / t) * 100) : 0
+})
+
+const stageLabel = computed(() => {
+  const st = state.stage && state.stage.stage
+  return { compress: '阶段：压缩图片（全部完成后开始评分）', score: '阶段：AI 评分' }[st] || ''
+})
+
+// 已用时（本批次开始时刻由进度首条事件近似）
+const elapsedText = computed(() => {
+  if (!state.running || !state.progress.length) return ''
+  const first = state.progress[state.progress.length - 1]
+  // progress 无时间戳，用组件内记录的 startedAt
+  if (!batchStartedAt) return ''
+  const sec = Math.round((Date.now() - batchStartedAt) / 1000)
+  return sec >= 60 ? `${Math.floor(sec / 60)}分${sec % 60}秒` : `${sec}秒`
+})
+
+let batchStartedAt = 0
+let etaTimer = null
+const etaText = ref('')
+
+function fmtEta(sec) {
+  if (sec <= 0) return ''
+  if (sec < 60) return `约 ${sec} 秒`
+  return `约 ${Math.floor(sec / 60)} 分 ${Math.round(sec % 60)} 秒`
+}
+
+// 监听进度变化计算速率（滑动窗口：最近 8 个完成的间隔均值）
+function tickEta() {
+  if (!state.running || !state.stage || !state.progress.length) {
+    etaText.value = ''
+    return
+  }
+  const total = state.stage.total || 0
+  const done = state.progress.length
+  if (!total || done === 0) { etaText.value = ''; return }
+  if (done >= total) { etaText.value = '即将完成…'; return }
+  const el = (Date.now() - batchStartedAt) / 1000
+  const rate = el / done // 秒/张（含并发摊销）
+  etaText.value = '剩余 ' + fmtEta(Math.round((total - done) * rate))
+}
+
+watch(() => state.progress.length, (n, o) => {
+  if (n === 1 && o === 0) batchStartedAt = Date.now()
+})
+watch(() => state.running, (r) => {
+  if (r) { batchStartedAt = Date.now() }
+  if (etaTimer) clearInterval(etaTimer)
+  if (r) etaTimer = setInterval(tickEta, 1000)
+  else { etaText.value = '' }
 })
 
 function statusLabel(s) {
@@ -87,6 +165,7 @@ async function doScan() {
     const live = r.items.filter((i) => !i.dup).length
     const dupCount = r.items.length - live
     state.scan = { count: r.items.length, live, est_cost: r.est_cost, dupCount }
+    refreshState() // 拉取最新目录历史
   } catch (e) {
     state.scan = null
     toast(e.message, true)
@@ -143,4 +222,13 @@ onMounted(async () => {
 .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .score { color: var(--accent); font-weight: 600; }
 .mono { font-size: 13px; }
+.dir-history { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.dir-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--card-2); border: 1px solid var(--line); border-radius: 999px;
+  padding: 2px 10px; font-size: 12px; cursor: pointer; max-width: 260px;
+}
+.dir-chip:hover { border-color: var(--accent); color: var(--accent); }
+.chip-x { color: var(--text-2); font-size: 13px; padding: 0 1px; }
+.chip-x:hover { color: var(--danger); }
 </style>

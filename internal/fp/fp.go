@@ -1,22 +1,23 @@
-// Package fp 计算文件内容指纹（SHA-256），用于去重、断点续跑与跨会话评分缓存。
+// Package fp 计算文件内容指纹（MD5），用于去重、断点续跑与跨会话评分缓存
+// （MD5 足够用于同图识别场景且计算更快；非安全用途）。
 package fp
 
 import (
-	"crypto/sha256"
+	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 )
 
-// OfFile 返回文件内容的 SHA-256 十六进制指纹
+// OfFile 返回文件内容的 MD5 十六进制指纹（32 位）
 func OfFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
+	h := md5.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
@@ -33,13 +34,13 @@ func Short(fingerprint string, n int) string {
 
 // OfBytes 返回字节内容的指纹（测试用）
 func OfBytes(b []byte) string {
-	h := sha256.Sum256(b)
+	h := md5.Sum(b)
 	return hex.EncodeToString(h[:])
 }
 
 // OfFileAt 为已打开文件计算指纹（避免重复打开）
 func OfFileAt(f io.Reader) (string, error) {
-	h := sha256.New()
+	h := md5.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", fmt.Errorf("计算指纹失败: %w", err)
 	}

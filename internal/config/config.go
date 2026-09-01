@@ -71,17 +71,30 @@ type PathsConfig struct {
 
 // Config 全量配置
 type Config struct {
-	Provider Provider       `yaml:"provider" json:"provider"`
-	Model    ModelConfig    `yaml:"model" json:"model"`
-	Weights  Weights        `yaml:"weights" json:"weights"`
-	Score    ScoreConfig    `yaml:"score" json:"score"`
-	Pipeline PipelineConfig `yaml:"pipeline" json:"pipeline"`
-	Cost     CostConfig     `yaml:"cost" json:"cost"`
-	Paths    PathsConfig    `yaml:"paths" json:"paths"`
+	Provider   Provider       `yaml:"provider" json:"provider"`
+	DirHistory []string       `yaml:"dir_history" json:"dir_history"` // 扫描目录历史（最近在前，上限 8）
+	Model      ModelConfig    `yaml:"model" json:"model"`
+	Weights    Weights        `yaml:"weights" json:"weights"`
+	Score      ScoreConfig    `yaml:"score" json:"score"`
+	Pipeline   PipelineConfig `yaml:"pipeline" json:"pipeline"`
+	Cost       CostConfig     `yaml:"cost" json:"cost"`
+	Paths      PathsConfig    `yaml:"paths" json:"paths"`
 }
 
-// DefaultDataDir 返回默认数据目录（%LOCALAPPDATA%\SnapRank）
+// DefaultDataDir 返回默认数据目录：exe 同级 data\（便携，随程序目录走）。
+// 首次调用时若存在旧用户目录（%LOCALAPPDATA%\SnapRank）则自动迁移 config/db/logs。
 func DefaultDataDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return legacyDataDir()
+	}
+	dir := filepath.Join(filepath.Dir(exe), "data")
+	migrateLegacyData(dir)
+	return dir
+}
+
+// legacyDataDir 旧版用户目录
+func legacyDataDir() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -91,6 +104,36 @@ func DefaultDataDir() string {
 		base = filepath.Join(home, "AppData", "Local")
 	}
 	return filepath.Join(base, "SnapRank")
+}
+
+// migrateLegacyData 把旧用户目录的 config/db/logs 迁到新数据目录（一次性，迁移后旧目录保留备份）
+func migrateLegacyData(newDir string) {
+	oldDir := legacyDataDir()
+	if oldDir == newDir {
+		return
+	}
+	st, err := os.Stat(filepath.Join(oldDir, "snaprank.db"))
+	if err != nil || st.IsDir() {
+		return // 旧库不存在，无需迁移
+	}
+	if st2, err2 := os.Stat(filepath.Join(newDir, "snaprank.db")); err2 == nil && !st2.IsDir() {
+		return // 新库已存在，不覆盖
+	}
+	os.MkdirAll(newDir, 0o755)
+	for _, name := range []string{"config.yaml", "snaprank.db", "snaprank.db-wal", "snaprank.db-shm"} {
+		if data, err := os.ReadFile(filepath.Join(oldDir, name)); err == nil {
+			os.WriteFile(filepath.Join(newDir, name), data, 0o600)
+		}
+	}
+	// 日志目录整体移动
+	if oldLogs, err := os.ReadDir(filepath.Join(oldDir, "logs")); err == nil && len(oldLogs) > 0 {
+		os.MkdirAll(filepath.Join(newDir, "logs"), 0o755)
+		for _, e := range oldLogs {
+			if data, err := os.ReadFile(filepath.Join(oldDir, "logs", e.Name())); err == nil {
+				os.WriteFile(filepath.Join(newDir, "logs", e.Name()), data, 0o644)
+			}
+		}
+	}
 }
 
 // DefaultPicturesDir 返回默认归档根目录（%USERPROFILE%\Pictures\SnapRank）
@@ -177,6 +220,20 @@ func Load(dataDir string) (*Config, error) {
 	cfg.Paths.DataDir = dataDir
 	cfg.normalize()
 	return cfg, nil
+}
+
+// RememberDir 记录扫描目录（去重、最近在前、上限 8）
+func (c *Config) RememberDir(dir string) {
+	if dir == "" {
+		return
+	}
+	out := []string{dir}
+	for _, d := range c.DirHistory {
+		if d != dir && len(out) < 8 {
+			out = append(out, d)
+		}
+	}
+	c.DirHistory = out
 }
 
 // Save 持久化配置到用户目录

@@ -16,6 +16,7 @@ import (
 
 	"snaprank/internal/archive"
 	"snaprank/internal/config"
+	"snaprank/internal/logutil"
 	"snaprank/internal/pipeline"
 	"snaprank/internal/provider"
 	"snaprank/internal/scorer"
@@ -92,19 +93,23 @@ func maskKey(k string) string {
 
 // SaveConfigRequest 保存配置请求（api_key 为空表示保持不变；"-" 表示清除）
 type SaveConfigRequest struct {
-	Provider *config.Provider       `json:"provider,omitempty"`
-	Model    *config.ModelConfig    `json:"model,omitempty"`
-	Weights  *config.Weights        `json:"weights,omitempty"`
-	Score    *config.ScoreConfig    `json:"score,omitempty"`
-	Pipeline *config.PipelineConfig `json:"pipeline,omitempty"`
-	Cost     *config.CostConfig     `json:"cost,omitempty"`
-	Paths    *config.PathsConfig    `json:"paths,omitempty"`
+	Provider   *config.Provider       `json:"provider,omitempty"`
+	DirHistory []string               `json:"dir_history,omitempty"` // 直接替换历史（删除标签用）
+	Model      *config.ModelConfig    `json:"model,omitempty"`
+	Weights    *config.Weights        `json:"weights,omitempty"`
+	Score      *config.ScoreConfig    `json:"score,omitempty"`
+	Pipeline   *config.PipelineConfig `json:"pipeline,omitempty"`
+	Cost       *config.CostConfig     `json:"cost,omitempty"`
+	Paths      *config.PathsConfig    `json:"paths,omitempty"`
 }
 
 // SaveConfig 部分更新并持久化配置
 func (c *Core) SaveConfig(req SaveConfigRequest) (*config.Config, error) {
 	c.cfgMu.Lock()
 	cfg := c.cfg
+	if req.DirHistory != nil {
+		cfg.DirHistory = req.DirHistory
+	}
 	if req.Provider != nil {
 		old := cfg.Provider.APIKey
 		cfg.Provider = *req.Provider
@@ -346,6 +351,42 @@ func (c *Core) OpenFolder(path string) error {
 	default:
 		return exec.Command("xdg-open", path).Start()
 	}
+}
+
+// RemoveDirHistory 删除一条目录历史标签
+func (c *Core) RemoveDirHistory(dir string) error {
+	c.cfgMu.Lock()
+	var out []string
+	for _, d := range c.cfg.DirHistory {
+		if d != dir {
+			out = append(out, d)
+		}
+	}
+	c.cfg.DirHistory = out
+	err := c.cfg.Save()
+	c.cfgMu.Unlock()
+	return err
+}
+
+// CleanWorkCache 清理压缩图缓存（data/work 整目录），返回释放的字节数（近似）。
+// 缓存按指纹可重建，清理后重跑同批照片会重新压缩（评分缓存仍在，不会重复计费）。
+func (c *Core) CleanWorkCache() (int64, error) {
+	if c.Engine().IsRunning() {
+		return 0, fmt.Errorf("任务运行中，请先停止或等待完成")
+	}
+	dir := filepath.Join(c.snapshotConfig().Paths.DataDir, "work")
+	size := int64(0)
+	filepath.Walk(dir, func(_ string, st os.FileInfo, err error) error {
+		if err == nil && !st.IsDir() {
+			size += st.Size()
+		}
+		return nil
+	})
+	if err := os.RemoveAll(dir); err != nil {
+		return 0, err
+	}
+	logutil.Info("已清理压缩缓存 %s（%.1f MB）", dir, float64(size)/1048576)
+	return size, nil
 }
 
 // ReportPath 最近会话的 report.csv（若已归档）

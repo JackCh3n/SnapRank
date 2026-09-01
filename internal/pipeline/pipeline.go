@@ -197,6 +197,9 @@ func (e *Engine) Scan(dir string) ([]*ScanItem, float64, error) {
 		return nil, 0, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
+	if len(items) > 0 {
+		cfg.RememberDir(dir) // 扫描到照片才记入历史
+	}
 	live := 0
 	for _, it := range items {
 		if !it.Dup {
@@ -485,11 +488,22 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		}
 		queue = append(queue, p)
 	}
+	// ---------- 阶段一：压缩（全部压完再进入评分） ----------
 	total := len(queue)
-	doneCount := atomic.Int64{}
-	e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "score", Total: total}})
-
+	e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: total}})
 	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", sessID, "compressed")
+	if stopped := e.compressAll(ctx, eng, queue, cacheDir, sessID, total); stopped {
+		return true
+	}
+
+	// ---------- 阶段二：评分（仅压缩成功的照片） ----------
+	var scoreQueue []*store.Photo
+	for _, p := range queue {
+		if p.Status != store.StatusBadImage {
+			scoreQueue = append(scoreQueue, p)
+		}
+	}
+	doneCount := atomic.Int64{}
 	jobs := make(chan *store.Photo)
 	workers := cfg.Pipeline.ScoreConcurrency
 	var wg sync.WaitGroup
@@ -503,24 +517,54 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 					stopFlag.Store(true)
 					continue
 				}
-				// 确保压缩图就绪（ToCache 幂等，命中即跳过）
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				if _, serr := os.Stat(cp); os.IsNotExist(serr) {
-					if _, cerr := eng.ToCache(p.SrcPath, p.Fingerprint, cacheDir); cerr != nil {
-						logutil.Info("压缩失败 %s: %v", p.Filename, cerr)
-						e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(cerr.Error(), 300))
-						idx := doneCount.Add(1)
-						e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(cerr.Error(), 120)}})
-						continue
-					}
-				}
-				e.store.SetPhotoCompressed(p.ID, cp)
 				prog := e.scoreOne(ctx, prov, model, p, cp, total, &doneCount)
 				e.Bus.Publish(Event{Type: "progress", Data: prog})
 			}
 		}()
 	}
-	// 生产者：受 ctx 控制提前收尾
+producer:
+	for _, p := range scoreQueue {
+		select {
+		case <-ctx.Done():
+			break producer
+		case jobs <- p:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return stopFlag.Load() && ctx.Err() != nil
+}
+
+// compressAll 并发压缩全部待处理照片；返回是否被停止。
+// 压缩成功的照片标记 compressed；失败的标记 bad_image 并从评分队列剔除。
+func (e *Engine) compressAll(ctx context.Context, eng *compress.Engine, queue []*store.Photo, cacheDir, sessID string, total int) bool {
+	jobs := make(chan *store.Photo)
+	cc := e.cfgFn().Pipeline.CompressConcurrency
+	var wg sync.WaitGroup
+	var stopFlag atomic.Bool
+	for i := 0; i < cc; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				if ctx.Err() != nil {
+					stopFlag.Store(true)
+					continue
+				}
+				cp, err := eng.ToCache(p.SrcPath, p.Fingerprint, cacheDir)
+				if err != nil {
+					logutil.Info("压缩失败 %s: %v", p.Filename, err)
+					e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
+					p.Status = store.StatusBadImage // 同步内存状态，评分阶段剔除
+					e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}})
+					continue
+				}
+				e.store.SetPhotoCompressed(p.ID, cp)
+				e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusCompressed}})
+			}
+		}()
+	}
 producer:
 	for _, p := range queue {
 		select {
@@ -531,7 +575,7 @@ producer:
 	}
 	close(jobs)
 	wg.Wait()
-	return stopFlag.Load() && ctx.Err() != nil
+	return stopFlag.Load()
 }
 
 func isFinalStatus(s string) bool {

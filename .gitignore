@@ -24,3 +24,5 @@ Thumbs.db
 
 # CI artifacts
 /dist/
+# 便携运行数据（数据库/配置/日志/压缩缓存）
+/data/

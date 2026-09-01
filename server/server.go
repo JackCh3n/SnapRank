@@ -49,6 +49,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/photo/bucket", s.handleBucket)
 	s.mux.HandleFunc("POST /api/recalculate", s.handleRecalc)
 	s.mux.HandleFunc("POST /api/rescore", s.handleRescore)
+	s.mux.HandleFunc("POST /api/clean-cache", s.handleCleanCache)
+	s.mux.HandleFunc("POST /api/dir-history/remove", s.handleRemoveDirHistory)
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
@@ -223,6 +225,32 @@ func (s *Server) handleRecalc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]int{"recalculated": n})
+}
+
+// handleRemoveDirHistory 删除一条目录历史
+func (s *Server) handleRemoveDirHistory(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Dir string `json:"dir"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.RemoveDirHistory(req.Dir); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"ok": "1"})
+}
+
+// handleCleanCache 清理压缩图缓存
+func (s *Server) handleCleanCache(w http.ResponseWriter, r *http.Request) {
+	freed, err := s.core.CleanWorkCache()
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"freed_bytes": freed, "freed_mb": float64(freed) / 1048576})
 }
 
 // handleRescore 复检重评：单张/多张（force=true 忽略缓存）或全部待复检（all=true）
