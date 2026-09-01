@@ -31,6 +31,15 @@
               <option value="cache">缓存</option>
             </select>
           </label>
+          <label class="field">
+            分数段
+            <select v-model="bandFilter" @change="applySort()">
+              <option value="">全部</option>
+              <option value="high">高分（精选档）</option>
+              <option value="mid">中分（良好档）</option>
+              <option value="low">低分（一般及以下）</option>
+            </select>
+          </label>
           <a class="btn plain" href="/api/report" download>导出 report.csv</a>
         </div>
         <div class="row">
@@ -82,7 +91,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api, toast } from '../store.js'
+import { api, toast, state } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 
 const items = ref([])
@@ -97,6 +106,16 @@ const running = ref(false)
 const loadSortTick = ref(0)
 const modelFilter = ref('')
 const sourceFilter = ref('')
+const bandFilter = ref('')
+
+// 分数段判定（跟随配置阈值 t=[high,mid,low]）
+function bandOf(p) {
+  if (p.status !== 'scored') return null
+  const t = (state.config && state.config.score && state.config.score.thresholds) || [9, 7, 5]
+  if (p.score >= t[0]) return 'high'
+  if (p.score >= t[1]) return 'mid'
+  return 'low'
+}
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 
 const modelOptions = computed(() => {
@@ -110,6 +129,7 @@ const viewItems = computed(() => {
   return items.value.filter((it) => {
     if (modelFilter.value && (it.model || '') !== modelFilter.value) return false
     if (sourceFilter.value && (it.source || '') !== sourceFilter.value) return false
+    if (bandFilter.value && bandOf(it) !== bandFilter.value) return false
     return true
   })
 })

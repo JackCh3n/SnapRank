@@ -122,7 +122,7 @@ func Default() *Config {
 		Weights: Weights{Technique: 0.4, Composition: 0.3, Content: 0.2, Color: 0.1},
 		Score: ScoreConfig{
 			Temperature: 0.2,
-			MaxTokens:   512,
+			MaxTokens:   2048,
 			TimeoutSec:  60,
 			Thresholds:  []float64{9, 7, 5},
 			ReuseScores: true,

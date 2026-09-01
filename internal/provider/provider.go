@@ -135,7 +135,12 @@ func (t *TokenRhythm) Score(ctx context.Context, model string, req ScoreRequest)
 		if len(resp.Choices) == 0 {
 			return "", fmt.Errorf("模型无返回内容")
 		}
-		return resp.Choices[0].Message.Content, nil
+		content := resp.Choices[0].Message.Content
+		// 思考型模型可能把 max_tokens 全部用于推理，正文被截断为空
+		if strings.TrimSpace(content) == "" && resp.Choices[0].FinishReason == openai.FinishReasonLength {
+			return "", fmt.Errorf("模型输出为空：max_tokens(%d) 被推理过程耗尽（finish_reason=length），请在设置中增大 max_tokens", req.MaxTokens)
+		}
+		return content, nil
 	}
 
 	out, err := call(true)
