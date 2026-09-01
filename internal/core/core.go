@@ -370,6 +370,37 @@ func (c *Core) RemoveDirHistory(dir string) error {
 	return err
 }
 
+// RenameSession 重命名批次
+func (c *Core) RenameSession(id, name string) error {
+	if id == "" {
+		return fmt.Errorf("缺少批次 ID")
+	}
+	return c.st.RenameSession(id, name)
+}
+
+// DeleteSession 删除批次（明细 + 该批次的压缩缓存目录）
+func (c *Core) DeleteSession(id string) (int64, error) {
+	if id == "" {
+		return 0, fmt.Errorf("缺少批次 ID")
+	}
+	if c.Engine().IsRunning() && c.Engine().CurrentSession() == id {
+		return 0, fmt.Errorf("批次正在运行，请先停止")
+	}
+	if err := c.st.DeleteSession(id); err != nil {
+		return 0, err
+	}
+	dir := filepath.Join(c.snapshotConfig().Paths.DataDir, "work", id)
+	size := int64(0)
+	filepath.Walk(dir, func(_ string, st os.FileInfo, err error) error {
+		if err == nil && !st.IsDir() {
+			size += st.Size()
+		}
+		return nil
+	})
+	os.RemoveAll(dir)
+	return size, nil
+}
+
 // ListSessions 全部会话
 func (c *Core) ListSessions() ([]*store.Session, error) { return c.st.ListSessions() }
 

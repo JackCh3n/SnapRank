@@ -72,6 +72,7 @@ type Photo struct {
 // Session 一次评分会话
 type Session struct {
 	ID            string `json:"id"`
+	Name          string `json:"name"`
 	CreatedAt     string `json:"created_at"`
 	SourceDir     string `json:"source_dir"`
 	Model         string `json:"model"`
@@ -160,6 +161,10 @@ CREATE TABLE IF NOT EXISTS spend_log (
   photos INTEGER NOT NULL,
   est_cost REAL NOT NULL
 );`)
+	// 旧库迁移：批次备注列
+	if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil {
+		// 列已存在，忽略
+	}
 	return err
 }
 
@@ -185,9 +190,9 @@ func (s *Store) UpdateSessionStatus(id, status string, total, done int) error {
 
 // GetSession 查询会话
 func (s *Store) GetSession(id string) (*Session, error) {
-	row := s.db.QueryRow(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done FROM sessions WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done FROM sessions WHERE id=?`, id)
 	var se Session
-	if err := row.Scan(&se.ID, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+	if err := row.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -198,10 +203,10 @@ func (s *Store) GetSession(id string) (*Session, error) {
 
 // FindResumableSession 查找同源目录未完成的会话（断点续跑）
 func (s *Store) FindResumableSession(sourceDir string) (*Session, error) {
-	row := s.db.QueryRow(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done
+	row := s.db.QueryRow(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done
 		FROM sessions WHERE source_dir=? AND status=? ORDER BY created_at DESC LIMIT 1`, sourceDir, SessionRunning)
 	var se Session
-	if err := row.Scan(&se.ID, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+	if err := row.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -212,7 +217,7 @@ func (s *Store) FindResumableSession(sourceDir string) (*Session, error) {
 
 // ListSessions 全部会话（新→旧）
 func (s *Store) ListSessions() ([]*Session, error) {
-	rows, err := s.db.Query(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done
+	rows, err := s.db.Query(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done
 		FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -221,12 +226,35 @@ func (s *Store) ListSessions() ([]*Session, error) {
 	var list []*Session
 	for rows.Next() {
 		var se Session
-		if err := rows.Scan(&se.ID, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+		if err := rows.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
 			return nil, err
 		}
 		list = append(list, &se)
 	}
 	return list, rows.Err()
+}
+
+// RenameSession 重命名批次（备注）
+func (s *Store) RenameSession(id, name string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET name=? WHERE id=?`, name, id)
+	return err
+}
+
+// DeleteSession 删除批次及其全部照片明细（不删压缩缓存与归档文件）
+func (s *Store) DeleteSession(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM photos WHERE session_id=?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // ClearAllData 清空业务数据（会话/明细/评分缓存/费用记录），保留配置
@@ -237,10 +265,10 @@ func (s *Store) ClearAllData() error {
 
 // LastSession 最近一次会话
 func (s *Store) LastSession() (*Session, error) {
-	row := s.db.QueryRow(`SELECT id, created_at, source_dir, model, prompt_version, status, total, done
+	row := s.db.QueryRow(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done
 		FROM sessions ORDER BY created_at DESC LIMIT 1`)
 	var se Session
-	if err := row.Scan(&se.ID, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+	if err := row.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

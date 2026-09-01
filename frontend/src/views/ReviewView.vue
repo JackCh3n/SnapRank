@@ -5,8 +5,9 @@
       <div class="head">
         <h3 class="title">批次分布</h3>
         <select v-model="sessionID" @change="onSessionChange" class="session-sel" title="切换历史会话">
-          <option v-for="s in sessions" :key="s.id" :value="s.id">{{ s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）</option>
+          <option v-for="s in sessions" :key="s.id" :value="s.id">{{ s.name || s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）</option>
         </select>
+        <button class="btn plain small" @click="showManager = true">⚙ 管理</button>
         <div class="muted" v-if="summary">
           均分 <b>{{ summary.avg_score.toFixed(1) }}</b> · 最高 <b>{{ summary.max_score.toFixed(1) }}</b> ·
           预估费用 ¥{{ summary.est_cost.toFixed(3) }}
@@ -108,6 +109,10 @@
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="state.running"
       @close="closePreview" />
+
+    <!-- 批次管理弹窗 -->
+    <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
+      @close="showManager = false" @changed="onSessionsChanged" />
   </div>
 </template>
 
@@ -115,6 +120,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { state, api, toast } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
+import SessionManager from '../components/SessionManager.vue'
 
 const bucketNames = ['35_精选', '34_良好', '33_一般', '30_待清理', '29_待复检']
 const bucketColors = ['#07c160', '#10aeff', '#ffa300', '#888888', '#fa5151']
@@ -130,6 +136,16 @@ const archiveResult = ref(null)
 const preview = ref(null)
 const sessionID = ref('')
 const sessions = ref([])
+const showManager = ref(false)
+
+// 批次管理变更后：刷新列表；当前查看的批次被删则回落到最新
+async function onSessionsChanged() {
+  await loadSessions()
+  if (!sessions.value.find((x) => x.id === sessionID.value)) {
+    sessionID.value = sessions.value.length ? sessions.value[0].id : ''
+  }
+  await Promise.all([loadSummary(), loadPhotos()])
+}
 
 function shortDir(d) {
   if (!d) return ''

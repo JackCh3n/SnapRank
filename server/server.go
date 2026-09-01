@@ -45,6 +45,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/stop", s.handleStop)
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	s.mux.HandleFunc("POST /api/session/rename", s.handleSessionRename)
+	s.mux.HandleFunc("POST /api/session/delete", s.handleSessionDelete)
 	s.mux.HandleFunc("POST /api/clear-all", s.handleClearAll)
 	s.mux.HandleFunc("GET /api/photos", s.handlePhotos)
 	s.mux.HandleFunc("GET /api/photo", s.handlePhoto)
@@ -180,6 +182,40 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, sum)
+}
+
+// handleSessionRename 批次重命名
+func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.RenameSession(req.ID, req.Name); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"ok": "1"})
+}
+
+// handleSessionDelete 删除批次
+func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	freed, err := s.core.DeleteSession(req.ID)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": "1", "freed_mb": float64(freed) / 1048576})
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {

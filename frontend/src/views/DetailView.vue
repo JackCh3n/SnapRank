@@ -7,10 +7,11 @@
             会话
             <select v-model="sessionID" @change="load(1)">
               <option v-for="s in sessions" :key="s.id" :value="s.id">
-                {{ s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）
+                {{ s.name || s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）
               </option>
             </select>
           </label>
+          <button class="btn plain small" @click="showManager = true">⚙ 管理批次</button>
           <label class="field">
             状态
             <select v-model="status" @change="load(1)">
@@ -94,6 +95,10 @@
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="running"
       @close="closePreview" />
+
+    <!-- 批次管理弹窗 -->
+    <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
+      @close="showManager = false" @changed="onSessionsChanged" />
   </div>
 </template>
 
@@ -101,6 +106,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, toast, state } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
+import SessionManager from '../components/SessionManager.vue'
 
 const items = ref([])
 const total = ref(0)
@@ -117,6 +123,15 @@ const sourceFilter = ref('')
 const bandFilter = ref('')
 const sessionID = ref('')
 const sessions = ref([])
+const showManager = ref(false)
+
+async function onSessionsChanged() {
+  await loadSessions()
+  if (!sessions.value.find((x) => x.id === sessionID.value)) {
+    sessionID.value = sessions.value.length ? sessions.value[0].id : ''
+  }
+  load(1)
+}
 
 // 分数段判定（跟随配置阈值 t=[high,mid,low]）
 function bandOf(p) {
