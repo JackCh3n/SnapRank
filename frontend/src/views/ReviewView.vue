@@ -47,15 +47,23 @@
 
     <!-- 照片网格 -->
     <div class="card" v-if="photos.length">
-      <h3 class="title">评分复核 <span class="muted">（可在下拉中手动调档）</span></h3>
+      <h3 class="title">评分复核 <span class="muted">（可在下拉中手动调档）</span>
+        <select v-model="scope" @change="loadPhotos" class="scope-sel">
+          <option value="scored">已评分照片</option>
+          <option value="all">全部照片（含失败/待处理）</option>
+        </select>
+      </h3>
       <div class="photo-grid">
         <div v-for="p in photos" :key="p.id" class="photo-card">
           <div class="thumb-wrap clickable" :class="{ 'parse-fail': p.status === 'parse_fail' }"
             @click="preview = p" title="点击查看大图与评分详情">
             <img :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
-            <span class="score-badge" :class="scoreClass(p.score)">{{ p.status === 'parse_fail' ? '复检' : p.score.toFixed(1) }}</span>
+            <span class="score-badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
           </div>
           <div class="p-name" :title="p.src_path">{{ p.filename }}</div>
+          <div class="p-dims muted" v-if="p.error && p.status !== 'scored' && p.status !== 'parse_fail'">
+            <span class="error-text">{{ p.error }}</span>
+          </div>
           <div class="p-dims muted" v-if="p.dims">
             技{{ p.dims.technique.toFixed(1) }} 构{{ p.dims.composition.toFixed(1) }}
             容{{ p.dims.content.toFixed(1) }} 色{{ p.dims.color.toFixed(1) }}
@@ -238,10 +246,26 @@ function autoBucket(p) {
 
 function thumbFail(p) { p._noThumb = true }
 
+const scope = ref('scored')
+
+function badgeText(p) {
+  if (p.status === 'parse_fail') return '复检'
+  if (p.status === 'scored') return p.score.toFixed(1)
+  return { failed: '调用失败', bad_image: '无法解码', unsupported: '不支持', duplicate: '重复', pending: '待处理', compressed: '已压缩' }[p.status] || p.status
+}
+function badgeClass(p) {
+  if (p.status === 'scored') return scoreClass(p.score)
+  return 'bad'
+}
+
 async function loadPhotos() {
   try {
-    const r = await api(`/api/photos?page=1&page_size=200&session=${sessionID.value}`)
-    photos.value = (r.items || []).filter((p) => p.status === 'scored' || p.status === 'parse_fail')
+    const r = await api(`/api/photos?page=1&page_size=500&session=${sessionID.value}`)
+    let list = r.items || []
+    if (scope.value === 'scored') {
+      list = list.filter((p) => p.status === 'scored' || p.status === 'parse_fail')
+    }
+    photos.value = list
   } catch { /* 尚无会话 */ }
 }
 
@@ -335,6 +359,7 @@ html.dark .thumb-wrap { background: #333; }
 .card-actions { display: flex; gap: 6px; align-items: center; margin: 6px 8px 8px; }
 .card-actions .bucket-sel { margin: 0; flex: 1; min-width: 0; }
 .parse-fail { outline: 2px solid var(--danger); outline-offset: -2px; border-radius: 10px; }
+.scope-sel { font-size: 13px; padding: 4px 8px; vertical-align: middle; max-width: 240px; }
 .thumb-wrap.clickable { cursor: zoom-in; }
 
 </style>

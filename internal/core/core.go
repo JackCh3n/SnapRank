@@ -227,16 +227,12 @@ func (c *Core) Scan(dir string, formats []string) ([]*pipeline.ScanItem, float64
 	return c.Engine().Scan(dir, formats)
 }
 
-// Start 启动流水线（阶段一）
-func (c *Core) Start(opts pipeline.StartOpts) (string, error) {
+// Start 启动流水线（阶段一）；返回任务创建结果（是否续跑/剩余张数）
+func (c *Core) Start(opts pipeline.StartOpts) (*pipeline.StartResult, error) {
 	if opts.Model == "" {
 		opts.Model = c.GetCurrentModel()
 	}
-	sessID, err := c.Engine().Start(opts)
-	if err != nil {
-		return "", err
-	}
-	return sessID, nil
+	return c.Engine().Start(opts)
 }
 
 // Stop 停止
@@ -255,13 +251,14 @@ func (c *Core) Archive(mode, sessionID string) (*pipeline.ArchiveSummary, error)
 // Recalculate 权重变更后本地重算
 func (c *Core) Recalculate(sessionID string) (int, error) { return c.Engine().Recalculate(sessionID) }
 
+// RescoreAllFailed 一键重试全部失败照片（解析失败 + 调用失败）
+func (c *Core) RescoreAllFailed() (string, int, error) { return c.Engine().RescoreAllFailed() }
+
 // Rescore 复检重评指定照片（force=true 忽略缓存强制重调 API）
 func (c *Core) Rescore(ids []int64, force bool) (string, error) {
 	return c.Engine().Rescore(ids, force)
 }
 
-// RescoreParseFail 一键重评全部解析失败照片
-func (c *Core) RescoreParseFail() (string, int, error) { return c.Engine().RescoreParseFail() }
 
 // ---------- 明细 / 缩略图 / 调档 ----------
 
@@ -283,8 +280,11 @@ func (c *Core) ListPhotos(sessionID, status string, page, pageSize int, sortKey,
 	if page < 1 {
 		page = 1
 	}
-	if pageSize <= 0 || pageSize > 200 {
+	if pageSize <= 0 {
 		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
 	}
 	// 分数段 → 分数区间（跟随配置阈值；分档只对已评分记录有意义）
 	minScore, maxScore := -1.0, -1.0

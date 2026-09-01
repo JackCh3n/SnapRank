@@ -204,7 +204,8 @@ func (s *Store) GetSession(id string) (*Session, error) {
 // FindResumableSession 查找同源目录未完成的会话（断点续跑）
 func (s *Store) FindResumableSession(sourceDir string) (*Session, error) {
 	row := s.db.QueryRow(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done
-		FROM sessions WHERE source_dir=? AND status=? ORDER BY created_at DESC LIMIT 1`, sourceDir, SessionRunning)
+		FROM sessions WHERE source_dir=? AND status IN (?,?) ORDER BY created_at DESC LIMIT 1`,
+		sourceDir, SessionRunning, SessionStopped)
 	var se Session
 	if err := row.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -232,6 +233,12 @@ func (s *Store) ListSessions() ([]*Session, error) {
 		list = append(list, &se)
 	}
 	return list, rows.Err()
+}
+
+// SetSessionStatus 只更新会话状态（保留进度字段）
+func (s *Store) SetSessionStatus(id, status string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET status=? WHERE id=?`, status, id)
+	return err
 }
 
 // RenameSession 重命名批次（备注）

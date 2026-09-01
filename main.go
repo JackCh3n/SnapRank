@@ -188,14 +188,18 @@ func runCmd(args []string) {
 	ch := bus.Subscribe()
 	defer bus.Unsubscribe(ch)
 
-	sessID, err := c.Start(pipeline.StartOpts{
+	res, err := c.Start(pipeline.StartOpts{
 		Dir: *dir, Model: *model, SampleN: *sample, ForceNew: *forceNew,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("会话 %s 开始处理 %s（模型 %s）\n", sessID, *dir, c.GetCurrentModel())
+	fmt.Printf("会话 %s 开始处理 %s（模型 %s）", res.SessionID, *dir, c.GetCurrentModel())
+	if res.Resumed {
+		fmt.Printf("，续跑剩余 %d 张", res.Pending)
+	}
+	fmt.Println()
 
 	var done *pipeline.DonePayload
 	for ev := range ch {

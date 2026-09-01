@@ -3,11 +3,15 @@
 package server
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +62,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/clean-cache", s.handleCleanCache)
 	s.mux.HandleFunc("POST /api/dir-history/remove", s.handleRemoveDirHistory)
 	s.mux.HandleFunc("POST /api/pick-dir", s.handlePickDir)
+	s.mux.HandleFunc("POST /api/import", s.handleImport)
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
@@ -168,12 +173,12 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
-	sessID, err := s.core.Start(req)
+	res, err := s.core.Start(req)
 	if err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"session_id": sessID})
+	writeJSON(w, 200, res)
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +226,88 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]interface{}{"ok": "1", "freed_mb": float64(freed) / 1048576})
+}
+
+// handleImport 接收前端上传的照片（粘贴/拖入），归类到独立导入目录。
+// 表单：files[] 文件，paths 为对应相对路径（JSON 数组，保留子目录结构）。
+func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(1 << 29); err != nil {
+		writeErr(w, 400, fmt.Errorf("解析上传失败: %w", err))
+		return
+	}
+	files := r.MultipartForm.File["files"]
+	if len(files) == 0 {
+		writeErr(w, 400, errors.New("未收到文件"))
+		return
+	}
+	var paths []string
+	if v := r.MultipartForm.Value["paths"]; len(v) > 0 {
+		json.Unmarshal([]byte(v[0]), &paths)
+	}
+	cfg := s.core.GetConfig()
+	dir := filepath.Join(cfg.Paths.DataDir, "imports",
+		time.Now().Format("20060102_150405")+"_"+randomSuffix())
+	saved := 0
+	for i, fh := range files {
+		rel := fh.Filename
+		if i < len(paths) && paths[i] != "" {
+			rel = paths[i]
+		}
+		rel = sanitizeRelPath(rel)
+		if rel == "" {
+			continue
+		}
+		dst := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		src, err := fh.Open()
+		if err != nil {
+			continue
+		}
+		out, err := os.Create(dst)
+		if err != nil {
+			src.Close()
+			continue
+		}
+		io.Copy(out, src)
+		out.Close()
+		src.Close()
+		saved++
+	}
+	if saved == 0 {
+		writeErr(w, 400, errors.New("没有可保存的文件"))
+		return
+	}
+	cfg.RememberDir(dir)
+	cfg.Save()
+	writeJSON(w, 200, map[string]interface{}{"dir": dir, "count": saved})
+}
+
+// sanitizeRelPath 清洗相对路径：去盘符/..，保留子目录结构
+func sanitizeRelPath(rel string) string {
+	rel = strings.ReplaceAll(rel, "\\", "/")
+	parts := strings.Split(rel, "/")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "." || p == ".." || strings.Contains(p, ":") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "/")
+}
+
+func randomSuffix() string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 4)
+	rand.Read(b)
+	for i := range b {
+		b[i] = letters[int(b[i])%len(letters)]
+	}
+	return string(b)
 }
 
 // handlePickDir 弹出本机目录选择框（服务与本机同机时可用）；串行化防止多窗
@@ -349,7 +436,7 @@ func (s *Server) handleRescore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.All {
-		sessID, n, err := s.core.RescoreParseFail()
+		sessID, n, err := s.core.RescoreAllFailed()
 		if err != nil {
 			writeErr(w, 400, err)
 			return

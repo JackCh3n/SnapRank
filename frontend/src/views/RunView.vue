@@ -19,7 +19,9 @@
             <option value="web">JPG/PNG/WebP</option>
           </select>
         </label>
-        <button class="btn plain" :disabled="state.running" @click="doScan">扫描</button>
+        <button class="btn plain" :disabled="scanning" @click="doScan">
+          {{ scanning ? '扫描中…（计算指纹）' : '扫描' }}
+        </button>
       </div>
       <div v-if="formatPreset && state.scan" class="muted" style="margin-top: 4px">
         已按「{{ formatLabel }}」筛选，其他格式（含 RAF/HEIC 等相机 RAW）不会进入评分
@@ -36,6 +38,12 @@
         <b>¥{{ state.scan.est_cost.toFixed(3) }}</b>
         <span v-if="state.scan.dupCount > 0">（重复 {{ state.scan.dupCount }} 张跳过）</span>
       </div>
+      <div class="muted" style="margin-top: 8px">
+        也可以把照片或文件夹<b>直接拖入本页面</b>，或对截图/照片 <b>Ctrl+V 粘贴</b>——
+        会自动归类到独立导入目录并扫描，成为一个新任务。
+      </div>
+      <div v-if="importing" class="tag" style="margin-top: 6px">📥 正在导入 {{ importDone }}/{{ importTotal }} 个文件…</div>
+      <div v-if="dragOver" class="drop-hint">松开鼠标，导入拖入的照片/文件夹</div>
       <div v-if="state.config && state.config.provider.type === 'mock'" class="tag" style="margin-top: 8px">
         当前为 mock 离线模式：不调用平台、不计费，评分为演示数据
       </div>
@@ -54,8 +62,10 @@
         <button class="btn plain" :disabled="loadingModels" @click="loadModels">
           {{ loadingModels ? '拉取中…' : '刷新模型列表' }}
         </button>
-        <button class="btn" :disabled="!state.dir" @click="doStart(true)">▶ 抽样试跑 10 张</button>
-        <button class="btn" :disabled="!state.dir" @click="doStart(false)">▶ 开始评分</button>
+        <button class="btn" :disabled="!state.dir || starting" @click="doStart(true)">
+          {{ starting ? '创建中…' : '▶ 抽样试跑 10 张' }}</button>
+        <button class="btn" :disabled="!state.dir || starting" @click="doStart(false)">
+          {{ starting ? '创建中…' : '▶ 开始评分' }}</button>
         <button class="btn danger" :disabled="!state.queue.current" @click="doStop">■ 停止当前任务</button>
       </div>
       <div class="muted" style="margin-top: 8px">
@@ -251,19 +261,136 @@ function statusLabel(s) {
   return { failed: '调用失败', bad_image: '图片无法解码', unsupported: '格式不支持', duplicate: '重复跳过', compressed: '已压缩' }[s] || s
 }
 
+const scanning = ref(false)
+const starting = ref(false)
+const importing = ref(false)
+const importDone = ref(0)
+const importTotal = ref(0)
+const dragOver = ref(false)
+
 async function doScan() {
   if (!state.dir) return toast('请先输入目录', true)
+  scanning.value = true
   try {
     const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir, formats: formatsArg.value }) })
     const live = r.items.filter((i) => !i.dup).length
     const dupCount = r.items.length - live
     state.scan = { count: r.items.length, live, est_cost: r.est_cost, dupCount }
+    toast(`扫描完成：共 ${r.items.length} 张`)
     refreshState() // 拉取最新目录历史
   } catch (e) {
     state.scan = null
     toast(e.message, true)
   }
+  scanning.value = false
 }
+
+// ---------- 粘贴/拖入导入 ----------
+function sanitizeName(name) {
+  return name.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+// 收集拖入项（支持文件夹递归）
+async function collectEntries(items) {
+  const files = []
+  const walk = async (entry, path) => {
+    if (!entry) return
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej))
+      f._rel = path + f.name
+      files.push(f)
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      const read = () => new Promise((res) => reader.readEntries(res, () => res([])))
+      let batch
+      do {
+        batch = await read()
+        for (const e of batch) await walk(e, path + entry.name + '/')
+      } while (batch.length)
+    }
+  }
+  const roots = []
+  for (const it of items) {
+    const entry = it.webkitGetAsEntry && it.webkitGetAsEntry()
+    if (entry) roots.push(entry)
+    else {
+      const f = it.getAsFile && it.getAsFile()
+      if (f) { f._rel = f.name; files.push(f) }
+    }
+  }
+  for (const e of roots) await walk(e, '')
+  return files.filter((f) => !f.type || f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif|raf|cr2|cr3|nef|arw|dng)$/i.test(f.name))
+}
+
+async function importFiles(files) {
+  if (!files.length) return
+  importing.value = true
+  importTotal.value = files.length
+  importDone.value = 0
+  try {
+    // 上传到导入目录（每个导入任务独立归类）
+    const fd = new FormData()
+    const paths = []
+    for (const f of files) {
+      fd.append('files', f, sanitizeName(f.name))
+      paths.push(sanitizeName(f._rel || f.name))
+      importDone.value++
+    }
+    fd.append('paths', JSON.stringify(paths))
+    const r = await fetch('/api/import', { method: 'POST', body: fd }).then((x) => x.json())
+    if (r.error) throw new Error(r.error)
+    state.dir = r.dir
+    toast(`已导入 ${r.count} 张到导入目录，开始扫描`)
+    await doScan()
+  } catch (e) {
+    toast('导入失败：' + e.message, true)
+  }
+  importing.value = false
+}
+
+// 粘贴（Ctrl+V 截图/照片）
+function onPaste(e) {
+  const files = []
+  for (const item of e.clipboardData.items || []) {
+    if (item.kind === 'file') {
+      const f = item.getAsFile()
+      if (f) files.push(f)
+    }
+  }
+  if (files.length) {
+    e.preventDefault()
+    importFiles(files)
+  }
+}
+
+// 拖入（照片/文件夹）
+function onDragOver(e) {
+  if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) {
+    e.preventDefault()
+    dragOver.value = true
+  }
+}
+function onDragLeave() { dragOver.value = false }
+async function onDrop(e) {
+  dragOver.value = false
+  if (!e.dataTransfer || !e.dataTransfer.items) return
+  e.preventDefault()
+  const files = await collectEntries([...e.dataTransfer.items])
+  importFiles(files)
+}
+
+onMounted(() => {
+  window.addEventListener('paste', onPaste)
+  window.addEventListener('dragover', onDragOver)
+  window.addEventListener('dragleave', onDragLeave)
+  window.addEventListener('drop', onDrop)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('paste', onPaste)
+  window.removeEventListener('dragover', onDragOver)
+  window.removeEventListener('dragleave', onDragLeave)
+  window.removeEventListener('drop', onDrop)
+})
 
 async function loadModels() {
   loadingModels.value = true
@@ -275,6 +402,7 @@ async function loadModels() {
 
 // 开始评分：任务创建后立即返回（后台排队执行），可继续添加新任务
 async function doStart(sample) {
+  starting.value = true
   try {
     if (state.selModel && state.selModel !== state.currentModel) {
       await api('/api/model', { method: 'POST', body: JSON.stringify({ id: state.selModel }) })
@@ -286,11 +414,14 @@ async function doStart(sample) {
     selectedTask.value = r.session_id
     taskOf(r.session_id)
     const queued = state.queue.queued.includes(r.session_id)
-    toast(queued ? `任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）` : `任务已开始：${r.session_id}`)
+    if (r.resumed) toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
+    else if (queued) toast(`任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
+    else toast(`任务已开始：${r.session_id}`)
     refreshState()
   } catch (e) {
     toast(e.message, true)
   }
+  starting.value = false
 }
 
 async function doStop() {
@@ -347,4 +478,10 @@ onMounted(async () => {
 .dir-chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip-x { color: var(--text-2); font-size: 13px; padding: 0 1px; }
 .chip-x:hover { color: var(--danger); }
+.drop-hint {
+  position: fixed; inset: 0; z-index: 98; pointer-events: none;
+  border: 4px dashed var(--accent); background: rgba(7, 193, 96, 0.08);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; color: var(--accent); font-weight: 700;
+}
 </style>

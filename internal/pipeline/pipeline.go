@@ -250,15 +250,22 @@ func (e *Engine) estCost(model string) float64 {
 
 // ---------- 启动与执行 ----------
 
+// StartResult 任务创建结果
+type StartResult struct {
+	SessionID string `json:"session_id"`
+	Resumed   bool   `json:"resumed"` // 是否续跑未完成的批次
+	Pending   int    `json:"pending"` // 续跑时剩余待处理张数
+}
+
 // Start 校验并创建评分任务；已有任务运行时自动排队（顺序执行）。
-// 校验同步返回错误，执行异步进行。
-func (e *Engine) Start(opts StartOpts) (string, error) {
+// 同目录存在未完成批次时自动续跑（只处理剩余的）。校验同步返回错误，执行异步进行。
+func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	cfg := e.cfgFn()
 	if opts.Dir == "" {
-		return "", errors.New("缺少源图目录")
+		return nil, errors.New("缺少源图目录")
 	}
 	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
-		return "", errors.New("尚未配置 API Key（可在设置切换 mock 模式离线体验）")
+		return nil, errors.New("尚未配置 API Key（可在设置切换 mock 模式离线体验）")
 	}
 	model := opts.Model
 	if model == "" {
@@ -267,7 +274,7 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 
 	items, _, err := e.Scan(opts.Dir, opts.Formats)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	live := 0
 	for _, it := range items {
@@ -276,7 +283,7 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 		}
 	}
 	if live == 0 {
-		return "", errors.New("目录中没有可处理的图片")
+		return nil, errors.New("目录中没有可处理的图片")
 	}
 	if opts.SampleN > 0 && opts.SampleN < live {
 		live = opts.SampleN
@@ -286,12 +293,12 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 	// 成本护栏：批次上限 + 每日上限
 	if e.estCost(model) > 0 {
 		if cfg.Cost.BatchLimit > 0 && estCost > cfg.Cost.BatchLimit {
-			return "", fmt.Errorf("预估费用 ¥%.2f 超过单批次上限 ¥%.2f（可先抽样试跑或在设置调整上限）", estCost, cfg.Cost.BatchLimit)
+			return nil, fmt.Errorf("预估费用 ¥%.2f 超过单批次上限 ¥%.2f（可先抽样试跑或在设置调整上限）", estCost, cfg.Cost.BatchLimit)
 		}
 		day := time.Now().Format("2006-01-02")
 		spent, _ := e.store.SpendToday(day)
 		if cfg.Cost.DailyLimit > 0 && spent+estCost > cfg.Cost.DailyLimit {
-			return "", fmt.Errorf("今日预估累计 ¥%.2f 将超过每日上限 ¥%.2f（可在设置调整）", spent+estCost, cfg.Cost.DailyLimit)
+			return nil, fmt.Errorf("今日预估累计 ¥%.2f 将超过每日上限 ¥%.2f（可在设置调整）", spent+estCost, cfg.Cost.DailyLimit)
 		}
 	}
 
@@ -308,7 +315,7 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 	} else {
 		sessID = newSessionID()
 		if err := e.store.CreateSession(sessID, opts.Dir, model, scorer.PromptVersion); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 
@@ -329,8 +336,16 @@ func (e *Engine) Start(opts StartOpts) (string, error) {
 		}
 	}
 
+	resumed := sess != nil
+	pending := 0
+	if resumed {
+		pending = live - sess.Done
+		if pending < 0 {
+			pending = 0
+		}
+	}
 	e.enqueue(sessID, opts, model)
-	return sessID, nil
+	return &StartResult{SessionID: sessID, Resumed: resumed, Pending: pending}, nil
 }
 
 // enqueue 任务入队；空闲则立即启动
@@ -433,25 +448,30 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 	return sess.ID, nil
 }
 
-// RescoreParseFail 一键重评当前会话全部解析失败的照片
-func (e *Engine) RescoreParseFail() (string, int, error) {
-	sess, err := e.store.LastSession()
-	if err != nil {
-		return "", 0, errors.New("暂无会话")
-	}
-	photos, _, err := e.store.ListPhotos(sess.ID, store.StatusParseFail, 0, 1<<20, "", "", "", "", -1, -1)
+// RescoreAllFailed 一键重试当前会话全部失败照片（解析失败 + 调用失败）
+func (e *Engine) RescoreAllFailed() (string, int, error) {
+	sess, err := e.resolveSession("")
 	if err != nil {
 		return "", 0, err
 	}
-	if len(photos) == 0 {
-		return "", 0, errors.New("没有待复检的照片")
+	photos, _, err := e.store.ListPhotos(sess.ID, "", 0, 1<<20, "", "", "", "", -1, -1)
+	if err != nil {
+		return "", 0, err
 	}
 	ids := make([]int64, 0, len(photos))
 	for _, p := range photos {
-		ids = append(ids, p.ID)
+		if p.Status == store.StatusParseFail || p.Status == store.StatusFailed {
+			ids = append(ids, p.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return "", 0, errors.New("没有可重试的失败照片")
 	}
 	sessID, err := e.Rescore(ids, true)
-	return sessID, len(ids), err
+	if err != nil {
+		return "", 0, err
+	}
+	return sessID, len(ids), nil
 }
 
 // CurrentSessionModel 会话锁定的模型
@@ -493,6 +513,7 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 	e.mu.Unlock()
 	e.running.Store(true)
 	e.concScale.Store(1)
+	e.store.SetSessionStatus(sessID, store.SessionRunning)
 	e.publishQueue()
 
 	go func() {
