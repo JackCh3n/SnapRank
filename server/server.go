@@ -11,14 +11,15 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"snaprank/internal/core"
-	"snaprank/internal/hostdialog"
 	"snaprank/internal/pipeline"
 	"snaprank/web"
 )
@@ -323,7 +324,9 @@ func randomSuffix() string {
 	return string(b)
 }
 
-// handlePickDir 弹出本机目录选择框（服务与本机同机时可用）；串行化防止多窗
+// handlePickDir 弹出本机目录选择框；串行化防止多窗。
+// 对话框运行在独立子进程（SnapRank.exe pickdir）中：COM 对话框的任何异常
+// 都不会影响服务进程；子进程作为新 GUI 进程也能自然抢占前台。
 var pickMu sync.Mutex
 
 func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
@@ -332,12 +335,34 @@ func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer pickMu.Unlock()
-	dir, err := hostdialog.PickFolder()
+
+	exe, err := os.Executable()
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"dir": dir})
+	cmd := exec.Command(exe, "pickdir")
+	cmd.Stderr = os.Stderr // 子进程崩溃详情进服务日志
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	out, outErr := cmd.Output()
+	line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "ERROR: "))
+	// 子进程崩溃/被杀也不影响服务：有结果就解析，否则返回错误
+	if line == "" || (outErr != nil && !strings.HasPrefix(string(out), "ERROR: ") && !strings.HasPrefix(string(out), "CANCELLED")) {
+		msg := "目录选择进程异常退出"
+		if outErr != nil {
+			msg += ": " + outErr.Error()
+		}
+		writeErr(w, 500, errors.New(msg))
+		return
+	}
+	switch {
+	case line == "CANCELLED" || line == "":
+		writeJSON(w, 200, map[string]string{"dir": ""})
+	case strings.HasPrefix(strings.TrimSpace(string(out)), "ERROR: "):
+		writeErr(w, 500, errors.New(line))
+	default:
+		writeJSON(w, 200, map[string]string{"dir": line})
+	}
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {

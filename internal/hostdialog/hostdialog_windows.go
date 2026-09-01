@@ -17,8 +17,6 @@ import (
 
 	"github.com/go-ole/go-ole"
 	"golang.org/x/sys/windows"
-
-	"snaprank/internal/logutil"
 )
 
 var (
@@ -34,6 +32,7 @@ var (
 	procGetWindowThreadProcID = user32.NewProc("GetWindowThreadProcessId")
 	procAttachThreadInput     = user32.NewProc("AttachThreadInput")
 	procGetCurrentThreadId    = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentThreadId")
+	enumWindowsProc           uintptr
 )
 
 const (
@@ -119,14 +118,6 @@ func PickFolder() (string, error) {
 	}
 	defer syscall.SyscallN(d.lpVtbl.Release, uintptr(unsafe.Pointer(d)))
 
-	// 探针：验证接口指针与 vtable 基址
-	logutil.Info("probe: d=%v lpVtbl=%v", uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(d.lpVtbl)))
-	hrAR, _, _ := syscall.SyscallN(d.lpVtbl.AddRef, uintptr(unsafe.Pointer(d)))
-	logutil.Info("probe AddRef hr=0x%x", hrAR)
-	var opts uint32
-	hrGO, _, _ := syscall.SyscallN(d.lpVtbl.GetOptions, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&opts)))
-	logutil.Info("probe GetOptions hr=0x%x opts=0x%x", hrGO, opts)
-
 	// 只允许选目录
 	if hr, _, _ := syscall.SyscallN(d.lpVtbl.SetOptions, uintptr(unsafe.Pointer(d)),
 		uintptr(fosPickFolders|fosForceFilesystem)); hr != 0 {
@@ -150,14 +141,19 @@ func PickFolder() (string, error) {
 		return "", fmt.Errorf("Show 失败: 0x%x", hr)
 	}
 
-	var item *vtblShellItem
+	// GetResult 取所选 IShellItem；对象首 8 字节是 vtable 指针，
+	// GetDisplayName 是 vtable 第 6 项（下标 5）。必须先读 vtable 指针再取函数——
+	// 直接把对象当 vtable 结构用会跳到对象内部数据（此前的崩溃根因）。
+	var item unsafe.Pointer
 	if hr, _, _ = syscall.SyscallN(d.lpVtbl.GetResult, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
 		return "", fmt.Errorf("GetResult 失败: 0x%x", hr)
 	}
-	defer syscall.SyscallN(item.Release, uintptr(unsafe.Pointer(item)))
+	itemVtbl := *(*unsafe.Pointer)(item)
+	defer syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(itemVtbl) + 2*8)), uintptr(item)) // Release
 
 	var pPath unsafe.Pointer
-	if hr, _, _ = syscall.SyscallN(item.GetDisplayName, uintptr(unsafe.Pointer(item)), uintptr(sigdnFilesysPath), uintptr(unsafe.Pointer(&pPath))); hr != 0 || pPath == nil {
+	getDisplayName := *(*uintptr)(unsafe.Pointer(uintptr(itemVtbl) + 5*8))
+	if hr, _, _ = syscall.SyscallN(getDisplayName, uintptr(item), uintptr(sigdnFilesysPath), uintptr(unsafe.Pointer(&pPath))); hr != 0 || pPath == nil {
 		return "", fmt.Errorf("GetDisplayName 失败: 0x%x", hr)
 	}
 	defer ole.CoTaskMemFree(uintptr(pPath))
@@ -184,23 +180,36 @@ func bringToFrontLoop(title string, stop chan struct{}) {
 	}
 }
 
-func findWindowByTitle(title string) uintptr {
-	found := uintptr(0)
-	cb := syscall.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		visible, _, _ := procIsWindowVisible.Call(hwnd)
-		if visible == 0 {
-			return 1
-		}
-		buf := make([]uint16, 128)
-		n, _, _ := procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-		if n > 0 && windows.UTF16ToString(buf[:n]) == title {
-			found = hwnd
-			return 0
-		}
+// EnumWindows 回调只能通过 syscall.NewCallback 创建一次（有全局数量上限，
+// 在轮询循环里反复创建会触发 "too many callback functions" 致命错误使进程退出）
+var (
+	findTargetTitle string
+	findResult      uintptr
+)
+
+func enumWindowsCallback(hwnd, lparam uintptr) uintptr {
+	visible, _, _ := procIsWindowVisible.Call(hwnd)
+	if visible == 0 {
 		return 1
-	})
-	procEnumWindows.Call(cb, 0)
-	return found
+	}
+	buf := make([]uint16, 128)
+	n, _, _ := procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n > 0 && windows.UTF16ToString(buf[:n]) == findTargetTitle {
+		findResult = hwnd
+		return 0
+	}
+	return 1
+}
+
+func init() {
+	enumWindowsProc = syscall.NewCallback(enumWindowsCallback)
+}
+
+func findWindowByTitle(title string) uintptr {
+	findTargetTitle = title
+	findResult = 0
+	procEnumWindows.Call(enumWindowsProc, 0)
+	return findResult
 }
 
 // foregroundToTop 通过 AttachThreadInput 抢占前台（绕过后台进程限制）

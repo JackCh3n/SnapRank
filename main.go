@@ -22,6 +22,7 @@ import (
 	"snaprank/internal/archive"
 	"snaprank/internal/config"
 	"snaprank/internal/core"
+	"snaprank/internal/hostdialog"
 	"snaprank/internal/logutil"
 	"snaprank/internal/pipeline"
 	"snaprank/server"
@@ -53,6 +54,18 @@ func main() {
 		serveCmd(args[1:])
 	case "run":
 		runCmd(args[1:])
+	case "pickdir":
+		// 内部子命令：弹出目录选择框并把结果写到 stdout（供服务端派生调用）。
+		// 始终正常退出，结果/错误都经 stdout 传递（父进程解析首行）。
+		dir, err := hostdialog.PickFolder()
+		switch {
+		case err != nil:
+			fmt.Println("ERROR: " + err.Error())
+		case dir == "":
+			fmt.Println("CANCELLED")
+		default:
+			fmt.Println(dir)
+		}
 	case "version", "-v", "--version":
 		fmt.Printf("SnapRank 帧选 %s\n", server.Version)
 	case "help", "-h", "--help":
