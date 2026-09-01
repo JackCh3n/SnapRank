@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"snaprank/internal/core"
+	"snaprank/internal/hostdialog"
 	"snaprank/internal/pipeline"
 	"snaprank/web"
 )
@@ -55,6 +57,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/rescore", s.handleRescore)
 	s.mux.HandleFunc("POST /api/clean-cache", s.handleCleanCache)
 	s.mux.HandleFunc("POST /api/dir-history/remove", s.handleRemoveDirHistory)
+	s.mux.HandleFunc("POST /api/pick-dir", s.handlePickDir)
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
@@ -216,6 +219,23 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]interface{}{"ok": "1", "freed_mb": float64(freed) / 1048576})
+}
+
+// handlePickDir 弹出本机目录选择框（服务与本机同机时可用）；串行化防止多窗
+var pickMu sync.Mutex
+
+func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
+	if !pickMu.TryLock() {
+		writeErr(w, 429, errors.New("目录选择窗口已打开，请先完成或取消"))
+		return
+	}
+	defer pickMu.Unlock()
+	dir, err := hostdialog.PickFolder("选择照片目录")
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"dir": dir})
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {

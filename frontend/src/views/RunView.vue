@@ -7,6 +7,8 @@
           源图目录（递归扫描，支持 jpg/png/webp/gif/bmp/tiff）
           <input v-model="state.dir" placeholder="例如 D:\\Photos\\2026-08" @keyup.enter="doScan" />
         </label>
+        <button class="btn plain" :disabled="picking" :title="picking ? '请在弹出的窗口中选择目录' : '弹出系统目录选择框'"
+          @click="pickDir">{{ picking ? '选择中…' : '📁 选择目录' }}</button>
         <button class="btn plain" :disabled="state.running" @click="doScan">扫描</button>
       </div>
       <div v-if="dirHistory.length" class="dir-history">
@@ -77,6 +79,25 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { state, api, toast, refreshState, refreshModels } from '../store.js'
 
 const loadingModels = ref(false)
+const picking = ref(false)
+
+// 弹出系统目录选择框（由本机服务端弹出），选完自动扫描
+async function pickDir() {
+  picking.value = true
+  try {
+    const r = await api('/api/pick-dir', { method: 'POST', body: '{}' })
+    if (r.dir) {
+      state.dir = r.dir
+      toast(`已选择：${r.dir}`)
+      doScan()
+    } else {
+      toast('已取消选择')
+    }
+  } catch (e) {
+    toast(e.message, true)
+  }
+  picking.value = false
+}
 const dirHistory = computed(() => (state.config && state.config.dir_history) || [])
 
 function shortDir(d) {
