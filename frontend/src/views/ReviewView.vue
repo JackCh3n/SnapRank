@@ -67,7 +67,7 @@
               <option v-for="b in bucketNames" :key="b" :value="b">{{ b }}</option>
             </select>
             <button class="btn plain small" :disabled="state.running" title="重新调用 AI 评分（忽略缓存，约 1 次调用费用）"
-              @click="rescoreOne(p)">↻ 复检</button>
+              @click="onRescore(p)">↻ 复检</button>
           </div>
         </div>
       </div>
@@ -269,7 +269,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.grid { display: flex; flex-direction: column; gap: 14px; max-width: 1080px; }
+.grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .bars { display: flex; gap: 26px; align-items: flex-end; padding: 6px 4px; }
 .bar-item { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 72px; }

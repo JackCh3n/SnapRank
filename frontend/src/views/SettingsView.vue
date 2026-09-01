@@ -158,6 +158,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.grid { display: flex; flex-direction: column; gap: 14px; max-width: 900px; }
+.grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .grow { flex: 1; min-width: 240px; }
 </style>

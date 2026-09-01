@@ -135,7 +135,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.grid { display: flex; flex-direction: column; gap: 14px; max-width: 1080px; }
+.grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .grow { flex: 1; min-width: 260px; }
 .feed { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
 .feed-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 4px; border-radius: 6px; }

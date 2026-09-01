@@ -4,7 +4,7 @@
       <div class="row" style="justify-content: space-between">
         <div class="row">
           <label class="field">
-            状态筛选
+            状态
             <select v-model="status" @change="load(1)">
               <option value="">全部</option>
               <option value="scored">已评分</option>
@@ -16,6 +16,21 @@
               <option value="pending">待处理</option>
             </select>
           </label>
+          <label class="field">
+            模型
+            <select v-model="modelFilter" @change="applySort()">
+              <option value="">全部</option>
+              <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
+            </select>
+          </label>
+          <label class="field">
+            来源
+            <select v-model="sourceFilter" @change="applySort()">
+              <option value="">全部</option>
+              <option value="api">API</option>
+              <option value="cache">缓存</option>
+            </select>
+          </label>
           <a class="btn plain" href="/api/report" download>导出 report.csv</a>
         </div>
         <div class="row">
@@ -24,7 +39,7 @@
           <button class="btn plain small" :disabled="page >= totalPages" @click="load(page + 1)">下一页</button>
         </div>
       </div>
-      <table class="list" v-if="items.length">
+      <table class="list" v-if="sortedViewItems.length">
         <thead>
           <tr>
             <th>缩略</th><th>文件名</th><th>状态</th>
@@ -37,7 +52,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in items" :key="p.id">
+          <tr v-for="p in sortedViewItems" :key="p.id">
             <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}`" class="mini clickable"
               loading="lazy" @click="preview = p" title="点击查看大图" /></td>
             <td class="clip" :title="p.src_path">{{ p.filename }}</td>
@@ -56,7 +71,7 @@
           </tr>
         </tbody>
       </table>
-      <div v-else class="muted">暂无明细</div>
+      <div v-else class="muted">暂无明细（当前筛选条件下无记录）</div>
     </div>
 
     <!-- 统一照片详情弹窗 -->
@@ -79,7 +94,25 @@ const sortKey = ref('')
 const sortAsc = ref(false)
 const preview = ref(null)
 const running = ref(false)
+const loadSortTick = ref(0)
+const modelFilter = ref('')
+const sourceFilter = ref('')
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+const modelOptions = computed(() => {
+  const set = new Set()
+  for (const it of items.value) if (it.model) set.add(it.model)
+  return [...set].sort()
+})
+
+// 过滤后的行（模型/来源为前端过滤；表格渲染与排序均基于它）
+const viewItems = computed(() => {
+  return items.value.filter((it) => {
+    if (modelFilter.value && (it.model || '') !== modelFilter.value) return false
+    if (sourceFilter.value && (it.source || '') !== sourceFilter.value) return false
+    return true
+  })
+})
 
 function toggleSort(k) {
   if (sortKey.value === k) {
@@ -97,16 +130,19 @@ function arrow(k) {
   return sortAsc.value ? '↑' : '↓'
 }
 
-function applySort() {
-  if (!sortKey.value) return
+// 排序键（保持响应式：viewItems 渲染时按 sortKey/sortAsc 动态排序）
+const sortedViewItems = computed(() => {
+  if (!sortKey.value) return viewItems.value
   const k = sortKey.value
   const dir = sortAsc.value ? 1 : -1
-  items.value = [...items.value].sort((a, b) => {
+  return [...viewItems.value].sort((a, b) => {
     const va = k === 'score' ? a.score : (a.dims ? a.dims[k] : -1)
     const vb = k === 'score' ? b.score : (b.dims ? b.dims[k] : -1)
     return (va - vb) * dir
   })
-}
+})
+
+function applySort() { /* sortedViewItems 为 computed，筛选/排序自动响应 */ }
 
 async function onRescore(p) {
   running.value = true
@@ -139,14 +175,13 @@ async function load(pg) {
   const r = await api(`/api/photos?page=${page.value}&page_size=${pageSize}&status=${status.value}`)
   items.value = r.items || []
   total.value = r.total || 0
-  applySort()
 }
 
 onMounted(() => load(1))
 </script>
 
 <style scoped>
-.grid { display: flex; flex-direction: column; gap: 14px; max-width: 1200px; }
+.grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .mini { width: 44px; height: 33px; object-fit: cover; border-radius: 4px; }
 .clip { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag.warn { background: #fff3e0; color: #ffa300; }
