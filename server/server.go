@@ -341,9 +341,15 @@ func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	cmd := exec.Command(exe, "pickdir")
-	cmd.Stderr = os.Stderr // 子进程崩溃详情进服务日志
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	exeDir := filepath.Dir(exe)
+	// 程序名恒为 SnapRank.exe（构建产物固定名），路径仅用于子进程定位
+	cmd := &exec.Cmd{
+		Path:        filepath.Join(exeDir, "SnapRank.exe"),
+		Args:        []string{"SnapRank.exe", "pickdir"},
+		Dir:         exeDir,
+		Stderr:      os.Stderr, // 子进程崩溃详情进服务日志
+		SysProcAttr: &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000},
+	}
 	out, outErr := cmd.Output()
 	line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "ERROR: "))
 	// 子进程崩溃/被杀也不影响服务：有结果就解析，否则返回错误
