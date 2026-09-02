@@ -93,8 +93,8 @@
     </div>
 
     <!-- 统一照片详情弹窗 -->
-    <PhotoModal v-if="preview" :photo="preview" :busy="running"
-      @close="closePreview" />
+    <PhotoModal v-if="preview" :photo="preview" :busy="running" :list="items"
+      @close="closePreview" @navigate="onNavigate" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
@@ -169,6 +169,10 @@ function arrow(k) {
 function closePreview() {
   preview.value = null
   load() // 复检可能已改变状态，关闭时刷新
+}
+
+function onNavigate(newPhoto) {
+  preview.value = newPhoto
 }
 
 

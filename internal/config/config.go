@@ -81,6 +81,26 @@ type Config struct {
 	Paths      PathsConfig    `yaml:"paths" json:"paths"`
 }
 
+// legacyVisionPatterns 旧版默认视觉过滤（会把 glm-5/5.1/5.2 纯文本模型误判为视觉）
+var legacyVisionPatterns = []string{
+	`qwen.*v|qwen.*flash|qwen.*vl`,
+	`glm-?[45].*v|glm-5|glm-4v`,
+	`seed-2|doubao.*vision|vision`,
+	`internvl|llava|gemma-3|step-1v|yi-vision`,
+}
+
+func visionPatternsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // DefaultDataDir 返回默认数据目录：exe 同级 data\（便携，随程序目录走）。
 // 首次调用时若存在旧用户目录（%LOCALAPPDATA%\SnapRank）则自动迁移 config/db/logs。
 func DefaultDataDir() string {
@@ -157,9 +177,10 @@ func Default() *Config {
 		Model: ModelConfig{
 			Default: "qwen3.7-flash",
 			VisionPatterns: []string{
-				`qwen.*v|qwen.*flash|qwen.*vl`,
-				`glm-?[45].*v|glm-5|glm-4v`,
-				`seed-2|doubao.*vision|vision`,
+				`qwen.*(flash|vl|v)`,
+				`glm-(4v|.*flash)`,
+				`seed-2\.1`,
+				`doubao.*vision|vision`,
 				`internvl|llava|gemma-3|step-1v|yi-vision`,
 			},
 		},
@@ -264,6 +285,10 @@ func (c *Config) normalize() {
 	case "", "low", "medium", "high":
 	default:
 		c.Score.ReasoningEffort = ""
+	}
+	// 视觉过滤迁移：旧默认把纯文本的 glm-5/5.1/5.2 误判为视觉，升级为新默认
+	if visionPatternsEqual(c.Model.VisionPatterns, legacyVisionPatterns) {
+		c.Model.VisionPatterns = d.Model.VisionPatterns
 	}
 	if c.Score.MaxTokens <= 0 {
 		c.Score.MaxTokens = d.Score.MaxTokens

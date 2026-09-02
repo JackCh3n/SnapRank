@@ -436,7 +436,10 @@ async function doStart(sample) {
     selectedTask.value = r.session_id
     taskOf(r.session_id)
     const queued = state.queue.queued.includes(r.session_id)
-    if (r.resumed) toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
+    if (r.resumed) {
+      const locked = state.selModel && r.model && state.selModel !== r.model
+      toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}${locked ? `；批次锁定模型 ${r.model}，本次选择未生效` : ''}`)
+    }
     else if (queued) toast(`任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
     else toast(`任务已开始：${r.session_id}`)
     refreshState()

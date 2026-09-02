@@ -255,6 +255,7 @@ type StartResult struct {
 	SessionID string `json:"session_id"`
 	Resumed   bool   `json:"resumed"` // 是否续跑未完成的批次
 	Pending   int    `json:"pending"` // 续跑时剩余待处理张数
+	Model     string `json:"model"`   // 本批次实际使用的模型（批次内锁定）
 }
 
 // Start 校验并创建评分任务；已有任务运行时自动排队（顺序执行）。
@@ -337,6 +338,14 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	}
 
 	resumed := sess != nil
+	if resumed {
+		// 批次内锁定模型：续跑沿用该批次创建时的模型，忽略新选择
+		// （避免同批混用两个模型的分数；想换模型请新建任务）
+		if sess.Model != "" && sess.Model != model {
+			logutil.Info("批次 %s 锁定模型 %s，忽略新选择 %s", sessID, sess.Model, model)
+			model = sess.Model
+		}
+	}
 	pending := 0
 	if resumed {
 		pending = live - sess.Done
@@ -345,7 +354,7 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 		}
 	}
 	e.enqueue(sessID, opts, model)
-	return &StartResult{SessionID: sessID, Resumed: resumed, Pending: pending}, nil
+	return &StartResult{SessionID: sessID, Resumed: resumed, Pending: pending, Model: model}, nil
 }
 
 // enqueue 任务入队；空闲则立即启动

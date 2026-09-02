@@ -3,7 +3,9 @@
     <div class="pm-card">
       <!-- 照片区 -->
       <div class="pm-photo">
+        <button v-if="hasPrev" class="pm-nav prev" title="上一张（←）" @click.stop="nav(-1)">‹</button>
         <img :src="`/api/thumb?id=${p.id}`" @click="$emit('close')" />
+        <button v-if="hasNext" class="pm-nav next" title="下一张（→）" @click.stop="nav(1)">›</button>
         <span class="pm-badge" :class="badgeClass">{{ badgeText }}</span>
         <button class="btn plain small pm-close" @click="$emit('close')">✕</button>
       </div>
@@ -101,8 +103,9 @@ import { state, toast, api } from '../store.js'
 const props = defineProps({
   photo: { type: Object, required: true },
   busy: { type: Boolean, default: false },
+  list: { type: Array, default: () => [] }, // 所属批次照片列表（用于上一张/下一张）
 })
-const emit = defineEmits(['close', 'rescore'])
+const emit = defineEmits(['close', 'rescore', 'navigate'])
 
 const p = computed(() => props.photo)
 const sharing = ref(false)
@@ -125,6 +128,9 @@ const badgeClass = computed(() => {
   return 'low'
 })
 
+const hasPrev = computed(() => props.list.length > 1)
+const hasNext = computed(() => props.list.length > 1)
+
 const dimRows = computed(() => {
   if (!p.value.dims) return []
   const w = (state.config && state.config.weights) || { technique: 0.4, composition: 0.3, content: 0.2, color: 0.1 }
@@ -137,8 +143,21 @@ const dimRows = computed(() => {
   ]
 })
 
-// ESC 关闭
-function onKey(e) { if (e.key === 'Escape') emit('close') }
+// 上一张/下一张（在 list 中循环）
+function nav(dir) {
+  if (!props.list || props.list.length < 2) return
+  const i = props.list.findIndex((x) => x.id === p.value.id)
+  if (i < 0) return
+  const ni = (i + dir + props.list.length) % props.list.length
+  emit('navigate', props.list[ni])
+}
+
+// ESC 关闭；←/→ 切换
+function onKey(e) {
+  if (e.key === 'Escape') emit('close')
+  if (e.key === 'ArrowLeft') nav(-1)
+  if (e.key === 'ArrowRight') nav(1)
+}
 onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
@@ -391,6 +410,15 @@ async function copyShareCard() {
 .pm-badge.best { background: #07c160; } .pm-badge.good { background: #10aeff; }
 .pm-badge.mid { background: #ffa300; } .pm-badge.bad { background: #fa5151; }
 .pm-close { position: absolute; right: 10px; top: 10px; }
+.pm-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 56px; border: none; cursor: pointer;
+  background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 30px;
+  line-height: 1; border-radius: 8px; z-index: 2;
+}
+.pm-nav:hover { background: rgba(0, 0, 0, 0.7); }
+.pm-nav.prev { left: 10px; }
+.pm-nav.next { right: 10px; }
 .pm-body { padding: 16px 20px 18px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
 
 .pm-file { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

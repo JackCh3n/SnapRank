@@ -115,8 +115,8 @@
     </div>
 
     <!-- 统一照片详情弹窗 -->
-    <PhotoModal v-if="preview" :photo="preview" :busy="state.running"
-      @close="closePreview" />
+    <PhotoModal v-if="preview" :photo="preview" :busy="state.running" :list="photos"
+      @close="closePreview" @navigate="onNavigate" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
@@ -215,6 +215,10 @@ function closePreview() {
   preview.value = null
   // 复检可能已改变评分，关闭时刷新汇总
   api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
+}
+
+function onNavigate(newPhoto) {
+  preview.value = newPhoto
 }
 
 async function rescoreAllFailed() {
