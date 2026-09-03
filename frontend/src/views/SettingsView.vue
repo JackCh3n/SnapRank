@@ -2,6 +2,17 @@
   <div class="grid" v-if="cfg">
     <div class="card">
       <h3 class="title">平台接入</h3>
+      <div class="row" v-if="presets.length" style="margin-bottom: 10px">
+        <label class="field">
+          快速切换预设
+          <select :value="activePresetName" @change="applyPreset($event.target.value)" style="width: 200px">
+            <option value="" disabled>选择已保存的平台…</option>
+            <option v-for="ps in presets" :key="ps.name" :value="ps.name">{{ ps.name }}</option>
+          </select>
+        </label>
+        <button class="btn plain small" :disabled="!activePresetName" @click="deletePreset">🗑️ 删除该预设</button>
+        <span class="muted">切换后自动填入对应的 URL 和 Key</span>
+      </div>
       <div class="row">
         <label class="field">
           Provider 类型
@@ -21,6 +32,9 @@
       </div>
       <div class="row" style="margin-top: 12px">
         <button class="btn plain" @click="testConn">{{ testing ? '测试中…' : '测试连接' }}</button>
+        <button class="btn plain small" @click="saveAsPreset">💾 将当前 URL+Key 存为预设</button>
+        <input v-model="presetSaveName" placeholder="预设名（如：基元律动主力）" style="width: 200px"
+          :disabled="!cfg.provider.base_url" />
         <span v-if="connState" :class="connState.ok ? 'tag' : 'error-text'">
           {{ connState.message }}
           <span v-if="connState.ok && connState.models">（{{ connState.models.length }} 个模型）</span>
@@ -138,7 +152,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { state, api, toast } from '../store.js'
 
 const cfg = ref(null)
@@ -149,6 +163,58 @@ const saving = ref(false)
 const connState = ref(null)
 const clearing = ref(false)
 const clearMsg = ref('')
+const presetSaveName = ref('')
+
+const presets = computed(() => (state.config && state.config.presets) || [])
+const activePresetName = computed(() => {
+  const c = state.config
+  if (!c) return ''
+  const hit = presets.value.find((p) => p.base_url === c.provider.base_url && p.api_key === c.provider.api_key)
+  return hit ? hit.name : ''
+})
+
+async function applyPreset(name) {
+  if (!name) return
+  try {
+    const cfgNew = await api('/api/preset/apply', { method: 'POST', body: JSON.stringify({ name }) })
+    state.config = cfgNew
+    cfg.value = cfgNew
+    cfg.value.provider.api_key = ''
+    connState.value = null
+    toast(`已切换到预设「${name}」，URL 和 Key 已填入`)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
+async function deletePreset() {
+  if (!activePresetName.value) return
+  if (!confirm(`删除预设「${activePresetName.value}」？（只删预设本身，不影响当前接入配置）`)) return
+  try {
+    const cfgNew = await api('/api/preset/delete', { method: 'POST', body: JSON.stringify({ name: activePresetName.value }) })
+    state.config = cfgNew
+    toast('预设已删除')
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
+async function saveAsPreset() {
+  const c = cfg.value
+  const name = presetSaveName.value.trim()
+  if (!name) { toast('请先填写预设名', true); return }
+  try {
+    await api('/api/preset/upsert', {
+      method: 'POST',
+      body: JSON.stringify({ name, base_url: c.provider.base_url, api_key: c.provider.api_key || '' }),
+    })
+    const st = await api('/api/state')
+    state.config = st.config
+    toast(`预设「${name}」已保存`)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 const purging = ref(false)
 const purgeDays = ref(30)
 const purgeMsg = ref('')

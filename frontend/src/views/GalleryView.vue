@@ -24,6 +24,9 @@
           <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
             🗑️ 删除所选（{{ selected.size }}）
           </button>
+          <button class="btn plain small" :disabled="!selected.size" @click="removeRecords">
+            📋 仅移除记录（{{ selected.size }}）
+          </button>
         </div>
       </div>
       <div class="row" style="margin-top: 8px">
@@ -42,10 +45,10 @@
 
     <div class="card" v-if="filtered.length">
       <div class="photo-grid">
-        <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id) }"
-          @click="preview = p" title="点击查看大图；勾选左上角选择框进行批量操作">
+        <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id), missing: !p.present }"
+          @click="preview = p" :title="p.present ? '点击查看大图；勾选左上角选择框进行批量操作' : '源文件已删除（评分记录保留）'">
           <div class="thumb-wrap">
-            <input type="checkbox" class="sel-box" :checked="selected.has(p.id)"
+            <input v-if="p.present" type="checkbox" class="sel-box" :checked="selected.has(p.id)"
               @click.stop="toggleSelect(p)" />
             <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
             <div v-else class="no-thumb">无预览</div>
@@ -54,7 +57,8 @@
           <div class="p-name" :title="p.src_path">{{ p.filename }}</div>
           <div class="p-meta muted">
             <span v-if="p.raw_siblings && p.raw_siblings.length" class="tag raw-tag">含 RAW</span>
-            <span>{{ (p.size / 1048576).toFixed(1) }} MB</span>
+            <span v-if="!p.present" class="tag raw-tag">源文件已删</span>
+            <span v-if="p.present">{{ (p.size / 1048576).toFixed(1) }} MB</span>
           </div>
         </div>
       </div>
@@ -73,7 +77,7 @@
         </div>
         <div class="cf-list">
           <div v-for="p in selectedItems" :key="p.id" class="cf-row">
-            <span class="cf-name">{{ p.filename }}</span>
+            <span class="cf-name">{{ p.filename }}<span v-if="!p.present" class="muted">（源文件已不存在，将跳过）</span></span>
             <span class="cf-score">{{ p.status === 'scored' ? p.score.toFixed(1) + ' 分' : badgeText(p) }}</span>
             <span class="cf-path" :title="p.src_path">{{ p.src_path }}</span>
           </div>
@@ -179,12 +183,33 @@ function onNavigate(newPhoto) {
   preview.value = newPhoto
 }
 
+// 仅移除数据库记录（源文件保留或已不存在）
+async function removeRecords() {
+  try {
+    await api('/api/gallery/delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids: [...selected.value], delete_raw: false }),
+    })
+    toast('已移除所选记录（源文件保留或已不存在）')
+    selected.value = new Set()
+    await load()
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
 async function doDelete() {
+  // 过滤掉源文件已不存在的（无可删）
+  const targets = filtered.value.filter((p) => selected.value.has(p.id) && p.present)
+  if (!targets.length) {
+    toast('所选照片的源文件都已不存在（可用“仅移除记录”清理）')
+    return
+  }
   deleting.value = true
   try {
     delResult.value = await api('/api/gallery/delete', {
       method: 'POST',
-      body: JSON.stringify({ ids: [...selected.value], delete_raw: deleteRaw.value }),
+      body: JSON.stringify({ ids: targets.map((p) => p.id), delete_raw: deleteRaw.value }),
     })
     selected.value = new Set()
     confirmOpen.value = false
@@ -239,6 +264,7 @@ html.dark .thumb-wrap { background: #333; }
 .p-name { padding: 6px 8px 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-meta { padding: 2px 8px 8px; display: flex; gap: 6px; align-items: center; font-size: 12px; }
 .raw-tag { background: #3a2c12; color: #ffa300; }
+.photo-card.missing { opacity: 0.45; }
 .cf-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 110;
   display: flex; align-items: center; justify-content: center; padding: 24px;

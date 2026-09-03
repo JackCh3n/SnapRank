@@ -54,6 +54,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	s.mux.HandleFunc("GET /api/gallery", s.handleGallery)
 	s.mux.HandleFunc("POST /api/db/purge", s.handleDBPurge)
+	s.mux.HandleFunc("POST /api/preset/upsert", s.handlePresetUpsert)
+	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
+	s.mux.HandleFunc("POST /api/preset/delete", s.handlePresetDelete)
 	s.mux.HandleFunc("POST /api/gallery/delete", s.handleGalleryDelete)
 	s.mux.HandleFunc("POST /api/session/rename", s.handleSessionRename)
 	s.mux.HandleFunc("POST /api/session/delete", s.handleSessionDelete)
@@ -213,6 +216,54 @@ func (s *Server) handleDBPurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, res)
+}
+
+func (s *Server) handlePresetUpsert(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name    string `json:"name"`
+		BaseURL string `json:"base_url"`
+		APIKey  string `json:"api_key"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.PresetUpsert(req.Name, req.BaseURL, req.APIKey); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, s.core.GetConfig())
+}
+
+func (s *Server) handlePresetApply(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	cfg, err := s.core.PresetApply(req.Name)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, cfg)
+}
+
+func (s *Server) handlePresetDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.PresetDelete(req.Name); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, s.core.GetConfig())
 }
 
 // handleGallery 图库列表

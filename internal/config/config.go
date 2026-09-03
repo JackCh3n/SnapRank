@@ -69,16 +69,24 @@ type PathsConfig struct {
 	DataDir     string `yaml:"data_dir" json:"data_dir"`         // 数据目录（配置/库/缓存/日志父目录）
 }
 
+// PlatformPreset 平台接入预设（多套 url+key 快速切换）
+type PlatformPreset struct {
+	Name    string `yaml:"name" json:"name"`
+	BaseURL string `yaml:"base_url" json:"base_url"`
+	APIKey  string `yaml:"api_key" json:"api_key"`
+}
+
 // Config 全量配置
 type Config struct {
-	Provider   Provider       `yaml:"provider" json:"provider"`
-	DirHistory []string       `yaml:"dir_history" json:"dir_history"` // 扫描目录历史（最近在前，上限 8）
-	Model      ModelConfig    `yaml:"model" json:"model"`
-	Weights    Weights        `yaml:"weights" json:"weights"`
-	Score      ScoreConfig    `yaml:"score" json:"score"`
-	Pipeline   PipelineConfig `yaml:"pipeline" json:"pipeline"`
-	Cost       CostConfig     `yaml:"cost" json:"cost"`
-	Paths      PathsConfig    `yaml:"paths" json:"paths"`
+	Presets    []PlatformPreset `yaml:"presets" json:"presets"`
+	Provider   Provider         `yaml:"provider" json:"provider"`
+	DirHistory []string         `yaml:"dir_history" json:"dir_history"` // 扫描目录历史（最近在前，上限 8）
+	Model      ModelConfig      `yaml:"model" json:"model"`
+	Weights    Weights          `yaml:"weights" json:"weights"`
+	Score      ScoreConfig      `yaml:"score" json:"score"`
+	Pipeline   PipelineConfig   `yaml:"pipeline" json:"pipeline"`
+	Cost       CostConfig       `yaml:"cost" json:"cost"`
+	Paths      PathsConfig      `yaml:"paths" json:"paths"`
 }
 
 // legacyVisionPatterns 旧版默认视觉过滤（会把 glm-5/5.1/5.2 纯文本模型误判为视觉）

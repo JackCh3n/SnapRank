@@ -475,12 +475,11 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 	out := make([]*GalleryItem, 0, len(photos))
 	for _, p := range photos {
 		it := &GalleryItem{Photo: p}
-		st, err := os.Stat(p.SrcPath)
-		if err != nil {
-			continue // 源文件已不在磁盘（被移走/删除）的不再进图库
+		if st, err := os.Stat(p.SrcPath); err == nil {
+			it.Present = true
+			it.Size = st.Size()
 		}
-		it.Present = true
-		it.Size = st.Size()
+		// 源文件已删除的也保留展示（标记 Present=false，不可再删除）
 		base := strings.TrimSuffix(p.SrcPath, filepath.Ext(p.SrcPath))
 		selfExt := filepath.Ext(p.SrcPath)
 		for _, ext := range rawSiblingExts {
@@ -499,11 +498,11 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 
 // GalleryDeleteResult 批量删除结果
 type GalleryDeleteResult struct {
-	Deleted  int      `json:"deleted"`   // 删除的照片源文件数
-	Raws     int      `json:"raws"`      // 联动删除的 RAW/伴生文件数
-	FreedMB  float64  `json:"freed_mb"`  // 释放空间
-	Missing  int      `json:"missing"`   // 源文件已不存在的
-	Errors   []string `json:"errors,omitempty"`
+	Deleted int      `json:"deleted"`  // 删除的照片源文件数
+	Raws    int      `json:"raws"`     // 联动删除的 RAW/伴生文件数
+	FreedMB float64  `json:"freed_mb"` // 释放空间
+	Missing int      `json:"missing"`  // 源文件已不存在的
+	Errors  []string `json:"errors,omitempty"`
 }
 
 // GalleryDelete 批量删除照片源文件（可选联动同名 RAW/HEIC 伴生文件），
@@ -549,13 +548,64 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult,
 	return res, nil
 }
 
+// PresetUpsert 保存平台预设（同名覆盖；apiKey 为空保持原值）
+func (c *Core) PresetUpsert(name, baseURL, apiKey string) error {
+	if name == "" {
+		return fmt.Errorf("预设名不能为空")
+	}
+	c.cfgMu.Lock()
+	defer c.cfgMu.Unlock()
+	for i := range c.cfg.Presets {
+		if c.cfg.Presets[i].Name == name {
+			c.cfg.Presets[i].BaseURL = baseURL
+			if apiKey != "" {
+				c.cfg.Presets[i].APIKey = apiKey
+			}
+			return c.cfg.Save()
+		}
+	}
+	c.cfg.Presets = append(c.cfg.Presets, config.PlatformPreset{Name: name, BaseURL: baseURL, APIKey: apiKey})
+	return c.cfg.Save()
+}
+
+// PresetApply 应用预设到当前接入配置
+func (c *Core) PresetApply(name string) (*config.Config, error) {
+	c.cfgMu.Lock()
+	defer c.cfgMu.Unlock()
+	for _, p := range c.cfg.Presets {
+		if p.Name == name {
+			c.cfg.Provider.BaseURL = p.BaseURL
+			c.cfg.Provider.APIKey = p.APIKey
+			if err := c.cfg.Save(); err != nil {
+				return nil, err
+			}
+			return c.GetConfig(), nil
+		}
+	}
+	return nil, fmt.Errorf("预设不存在: %s", name)
+}
+
+// PresetDelete 删除预设
+func (c *Core) PresetDelete(name string) error {
+	c.cfgMu.Lock()
+	defer c.cfgMu.Unlock()
+	var out []config.PlatformPreset
+	for _, p := range c.cfg.Presets {
+		if p.Name != name {
+			out = append(out, p)
+		}
+	}
+	c.cfg.Presets = out
+	return c.cfg.Save()
+}
+
 // DBPurgeResult 按天清理结果
 type DBPurgeResult struct {
-	Days        int   `json:"days"`
-	Sessions    int64 `json:"sessions"`
-	Photos      int64 `json:"photos"`
-	ScoreCache  int64 `json:"score_cache"`
-	SpendLog    int64 `json:"spend_log"`
+	Days       int   `json:"days"`
+	Sessions   int64 `json:"sessions"`
+	Photos     int64 `json:"photos"`
+	ScoreCache int64 `json:"score_cache"`
+	SpendLog   int64 `json:"spend_log"`
 }
 
 // PurgeOldRecords 手动清理 N 天前的数据库记录（批次/明细/评分缓存/API 用量），
