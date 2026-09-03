@@ -443,6 +443,10 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 		if err != nil || p == nil || p.SessionID != sess.ID {
 			continue
 		}
+		// 不支持的格式（RAF/HEIC 等）与解码失败无法通过重试解决，直接跳过
+		if p.Status == store.StatusUnsupported || p.Status == store.StatusBadImage {
+			continue
+		}
 		e.store.ResetPhoto(id)
 		if forceCost {
 			// 重置后清除指纹缓存条目，强制重调 API（同模型+版本）
@@ -617,11 +621,21 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	}
 
 	// ---------- 阶段一：压缩（全部压完再进入评分） ----------
-	totalAll := cacheHits + len(queue) // 评分阶段进度分母含缓存命中
-	if len(queue) > 0 {
-		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: len(queue)}})
+	// 不支持的格式（RAF/HEIC 等）直接标记跳过，不进压缩队列
+	var compressQueue []*store.Photo
+	for _, p := range queue {
+		if compress.UnsupportedExts[strings.ToLower(filepath.Ext(p.SrcPath))] {
+			e.store.SetPhotoStatus(p.ID, store.StatusUnsupported, "不支持的格式（RAW/HEIC），已跳过")
+			e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusUnsupported, Error: "不支持的格式（RAW/HEIC），已跳过"}})
+			continue
+		}
+		compressQueue = append(compressQueue, p)
 	}
-	if stopped := e.compressAll(ctx, eng, queue, cacheDir, sessID, len(queue)); stopped {
+	totalAll := cacheHits + len(compressQueue) // 评分阶段进度分母含缓存命中
+	if len(compressQueue) > 0 {
+		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: len(compressQueue)}})
+	}
+	if stopped := e.compressAll(ctx, eng, compressQueue, cacheDir, sessID, len(compressQueue)); stopped {
 		return true
 	}
 

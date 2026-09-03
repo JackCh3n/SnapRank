@@ -201,7 +201,7 @@ func Default() *Config {
 		Score: ScoreConfig{
 			Temperature: 0.2,
 			MaxTokens:   2048,
-			TimeoutSec:  60,
+			TimeoutSec:  120,
 			Thresholds:  []float64{9, 7, 5},
 			ReuseScores: true,
 		},

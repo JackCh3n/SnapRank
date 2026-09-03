@@ -140,6 +140,9 @@ func (t *TokenRhythm) Score(ctx context.Context, model string, req ScoreRequest)
 		}
 		resp, err := t.client.CreateChatCompletion(ctx, r)
 		if err != nil {
+			if strings.Contains(err.Error(), "context deadline exceeded") {
+				return "", fmt.Errorf("请求超时（%ds）：模型响应慢或图片过大，可在设置增大超时/降低并发，或换更快模型", int(req.Timeout.Seconds()))
+			}
 			return "", classifyErr(err)
 		}
 		if len(resp.Choices) == 0 {
