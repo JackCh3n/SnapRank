@@ -53,6 +53,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	s.mux.HandleFunc("GET /api/gallery", s.handleGallery)
+	s.mux.HandleFunc("GET /api/photo/scores", s.handlePhotoScores)
+	s.mux.HandleFunc("GET /api/import-dir", s.handleGetImportDir)
 	s.mux.HandleFunc("POST /api/db/purge", s.handleDBPurge)
 	s.mux.HandleFunc("POST /api/preset/upsert", s.handlePresetUpsert)
 	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
@@ -265,6 +267,20 @@ func (s *Server) handlePresetDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, s.core.GetConfig())
+}
+
+func (s *Server) handlePhotoScores(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	scores, err := s.core.PhotoModelScores(id)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, scores)
+}
+
+func (s *Server) handleGetImportDir(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]string{"dir": s.core.GetImportDir()})
 }
 
 // handleGallery 图库列表

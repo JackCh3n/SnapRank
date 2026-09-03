@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS score_cache (
   created_at TEXT NOT NULL,
   PRIMARY KEY (fingerprint, model, prompt_version)
 );
+CREATE TABLE IF NOT EXISTS photo_scores (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  photo_id INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  score REAL NOT NULL,
+  dims TEXT,
+  tags TEXT,
+  strength TEXT DEFAULT '',
+  weakness TEXT DEFAULT '',
+  source TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS spend_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   day TEXT NOT NULL,
@@ -411,6 +428,70 @@ func (s *Store) GalleryList() ([]*Photo, error) {
 	return list, rows.Err()
 }
 
+// PhotoModelScore 单条多模型评分历史
+type PhotoModelScore struct {
+	Model         string   `json:"model"`
+	PromptVersion string   `json:"prompt_version"`
+	Score         float64  `json:"score"`
+	Dims          *Dims    `json:"dims,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	Strength      string   `json:"strength"`
+	Weakness      string   `json:"weakness"`
+	Source        string   `json:"source"`
+	CreatedAt     string   `json:"created_at"`
+}
+
+// SavePhotoModelScore 保存一条多模型评分历史（每次评分追加一条）
+func (s *Store) SavePhotoModelScore(photoID int64, model, promptVersion string, score float64, dims *Dims, tags []string, strength, weakness, source string) error {
+	dimsJSON, _ := json.Marshal(dims)
+	tagsJSON, _ := json.Marshal(tags)
+	_, err := s.db.Exec(`INSERT INTO photo_scores(photo_id, model, prompt_version, score, dims, tags, strength, weakness, source, created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		photoID, model, promptVersion, score, string(dimsJSON), string(tagsJSON), strength, weakness, source, time.Now().Format("2006-01-02 15:04:05"))
+	return err
+}
+
+// GetPhotoModelScores 获取照片的全部多模型评分历史
+func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
+	rows, err := s.db.Query(`SELECT model, prompt_version, score, dims, tags, strength, weakness, source, created_at
+		FROM photo_scores WHERE photo_id=? ORDER BY created_at DESC`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*PhotoModelScore
+	for rows.Next() {
+		var m PhotoModelScore
+		var dimsJSON, tagsJSON sql.NullString
+		if err := rows.Scan(&m.Model, &m.PromptVersion, &m.Score, &dimsJSON, &tagsJSON, &m.Strength, &m.Weakness, &m.Source, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		if dimsJSON.Valid && dimsJSON.String != "" {
+			var d Dims
+			if json.Unmarshal([]byte(dimsJSON.String), &d) == nil {
+				m.Dims = &d
+			}
+		}
+		if tagsJSON.Valid && tagsJSON.String != "" {
+			json.Unmarshal([]byte(tagsJSON.String), &m.Tags)
+		}
+		list = append(list, &m)
+	}
+	return list, rows.Err()
+}
+
+// ImportDir Get/Set 持久化导入目录（跨重启共用一个粘贴批次）
+func (s *Store) GetImportDir() string {
+	var dir string
+	s.db.QueryRow(`SELECT value FROM app_meta WHERE key='import_dir'`).Scan(&dir)
+	return dir
+}
+
+func (s *Store) SetImportDir(dir string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO app_meta(key, value) VALUES('import_dir', ?)`, dir)
+	return err
+}
+
 // PurgePhotosOlderThan 删除 N 天前（按所属批次创建时间）的照片明细
 func (s *Store) PurgePhotosOlderThan(days int) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM photos WHERE session_id IN
@@ -425,6 +506,16 @@ func (s *Store) PurgePhotosOlderThan(days int) (int64, error) {
 // PurgeSessionsOlderThan 删除 N 天前创建的批次
 func (s *Store) PurgeSessionsOlderThan(days int) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM sessions WHERE created_at < datetime('now', '-' || ? || ' days')`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PurgePhotoScoresOlderThan 删除 N 天前的多模型评分历史
+func (s *Store) PurgePhotoScoresOlderThan(days int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM photo_scores WHERE created_at < datetime('now', '-' || ? || ' days')`, days)
 	if err != nil {
 		return 0, err
 	}

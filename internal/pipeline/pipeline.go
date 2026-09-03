@@ -461,10 +461,8 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 	if n == 0 {
 		return "", errors.New("所选照片不属于当前会话")
 	}
-	model := e.CurrentSessionModel(sess.ID)
-	if model == "" {
-		model = cfg.Model.Default
-	}
+	// 复检重评使用当前配置的默认模型（而非批次旧模型）
+	model := cfg.Model.Default
 	e.enqueue(sess.ID, StartOpts{Dir: sess.SourceDir}, model)
 	logutil.Info("复检重评 %d 张入队（会话 %s，强制重调=%v）", n, sess.ID, forceCost)
 	return sess.ID, nil
@@ -747,6 +745,7 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
 			score := scorer.WeightedScore(ent.Dims, cfg.WeightsNormalized())
 			e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
+			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, "cache")
 			idx := doneCount.Add(1)
 			return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}
 		}
@@ -813,6 +812,8 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 	score := scorer.WeightedScore(dims, cfg.WeightsNormalized())
 	e.store.SetPhotoResult(p.ID, store.StatusScored, score, &dims, tags, strength, weakness, model, scorer.PromptVersion, "api", clamped, time.Since(start).Milliseconds())
 	e.store.CachePut(p.Fingerprint, model, scorer.PromptVersion, dims, tags, strength, weakness)
+	// 多模型评分历史：每次 API 评分追加一条（切换模型可对比）
+	e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &dims, tags, strength, weakness, "api")
 	return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored}
 }
 

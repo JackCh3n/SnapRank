@@ -484,6 +484,16 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 	return out, nil
 }
 
+// GetImportDir 获取持久化导入目录（跨重启共用一个粘贴批次）
+func (c *Core) GetImportDir() string {
+	return c.st.GetImportDir()
+}
+
+// SetImportDir 设置导入目录
+func (c *Core) SetImportDir(dir string) error {
+	return c.st.SetImportDir(dir)
+}
+
 // GalleryDeleteResult 批量删除结果
 type GalleryDeleteResult struct {
 	Deleted int      `json:"deleted"`  // 删除的照片源文件数
@@ -636,6 +646,11 @@ func (c *Core) PurgeOldRecords(days int) (*DBPurgeResult, error) {
 	logutil.Info("手动库管理：清理 %d 天前记录（批次 %d / 明细 %d / 评分缓存 %d / API 记录 %d）",
 		days, res.Sessions, res.Photos, res.ScoreCache, res.SpendLog)
 	return res, nil
+}
+
+// PhotoModelScores 获取照片的多模型评分历史
+func (c *Core) PhotoModelScores(photoID int64) ([]*store.PhotoModelScore, error) {
+	return c.st.GetPhotoModelScores(photoID)
 }
 
 // ReportPath 最近会话的 report.csv（若已归档）

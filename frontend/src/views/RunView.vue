@@ -366,6 +366,9 @@ async function importFiles(files) {
     }
     fd.append('paths', JSON.stringify(paths))
     if (state.importDir) fd.append('dir', state.importDir) // 追加到当前导入任务
+    // 共用导入目录：从服务端获取持久化值（跨重启不丢）
+    const impDir = await api('/api/import-dir').then(x => x.dir).catch(() => '')
+    if (impDir) fd.append('dir', impDir)
     const r = await fetch('/api/import', { method: 'POST', body: fd }).then((x) => x.json())
     if (r.error) throw new Error(r.error)
     state.importDir = r.dir

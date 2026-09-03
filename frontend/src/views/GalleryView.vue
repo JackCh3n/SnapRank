@@ -48,7 +48,7 @@
         <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id), missing: !p.present }"
           @click="preview = p" :title="p.present ? '点击查看大图；勾选左上角选择框进行批量操作' : '源文件已删除（评分记录保留）'">
           <div class="thumb-wrap">
-            <input v-if="p.present" type="checkbox" class="sel-box" :checked="selected.has(p.id)"
+            <input type="checkbox" class="sel-box" :checked="selected.has(p.id)"
               @click.stop="toggleSelect(p)" />
             <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
             <div v-else class="no-thumb">无预览</div>
