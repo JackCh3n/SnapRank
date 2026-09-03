@@ -409,6 +409,47 @@ func (s *Store) GalleryList() ([]*Photo, error) {
 	return list, rows.Err()
 }
 
+// PurgePhotosOlderThan 删除 N 天前（按所属批次创建时间）的照片明细
+func (s *Store) PurgePhotosOlderThan(days int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM photos WHERE session_id IN
+		(SELECT id FROM sessions WHERE created_at < datetime('now', '-' || ? || ' days'))`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PurgeSessionsOlderThan 删除 N 天前创建的批次
+func (s *Store) PurgeSessionsOlderThan(days int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE created_at < datetime('now', '-' || ? || ' days')`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PurgeScoreCacheOlderThan 删除 N 天前写入的评分缓存
+func (s *Store) PurgeScoreCacheOlderThan(days int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM score_cache WHERE created_at < datetime('now', '-' || ? || ' days')`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PurgeSpendLogOlderThan 删除 N 天前的 API 用量记录
+func (s *Store) PurgeSpendLogOlderThan(days int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM spend_log WHERE day < date('now', '-' || ? || ' days')`, days)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // DeletePhotosBySrcPaths 删除指定源路径的全部照片记录（跨批次）
 func (s *Store) DeletePhotosBySrcPaths(srcPaths []string) error {
 	tx, err := s.db.Begin()

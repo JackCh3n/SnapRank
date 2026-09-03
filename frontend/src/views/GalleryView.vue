@@ -21,7 +21,7 @@
         <div class="row">
           <button class="btn plain small" @click="selectAll">{{ selected.size ? '取消全选' : '全选当前筛选' }}</button>
           <button class="btn plain small" :disabled="!lowCount" @click="selectLow">选择低分 &lt; {{ lowThreshold }} 分（{{ lowCount }}）</button>
-          <button class="btn danger" :disabled="!selected.size || deleting" @click="doDelete">
+          <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
             🗑️ 删除所选（{{ selected.size }}）
           </button>
         </div>
@@ -34,7 +34,7 @@
       </div>
       <div v-if="delResult" class="muted" style="margin-top: 6px">
         ✅ 已删除 {{ delResult.deleted }} 张源文件、{{ delResult.raws }} 个 RAW/伴生文件（释放
-        {{ delResult.freed_mb.toFixed(1) }} MB，移除 {{ delResult.rows_removed }} 条记录）
+        {{ delResult.freed_mb.toFixed(1) }} MB）· 数据库与 API 记录已保留
         <span v-if="delResult.missing" class="error-text">（{{ delResult.missing }} 张源文件本已不存在）</span>
         <div v-for="(e, i) in delResult.errors || []" :key="i" class="error-text">{{ e }}</div>
       </div>
@@ -63,6 +63,29 @@
 
     <PhotoModal v-if="preview" :photo="preview" :busy="false" :list="filtered"
       @close="preview = null" @navigate="onNavigate" />
+
+    <!-- 删除二次预览确认 -->
+    <div v-if="confirmOpen" class="cf-mask" @click.self="confirmOpen = false">
+      <div class="cf-card">
+        <h3 class="title" style="color: var(--danger)">⚠️ 删除确认（第 2 步 / 共 2 步）</h3>
+        <div class="muted" style="margin-bottom: 8px">
+          将永久删除以下 <b>{{ selected.size }}</b> 张照片的源文件{{ deleteRaw ? '，并联动删除同名 RAW/HEIC 伴生文件' : '' }}（不可恢复）：
+        </div>
+        <div class="cf-list">
+          <div v-for="p in selectedItems" :key="p.id" class="cf-row">
+            <span class="cf-name">{{ p.filename }}</span>
+            <span class="cf-score">{{ p.status === 'scored' ? p.score.toFixed(1) + ' 分' : badgeText(p) }}</span>
+            <span class="cf-path" :title="p.src_path">{{ p.src_path }}</span>
+          </div>
+        </div>
+        <div class="row" style="justify-content: flex-end; margin-top: 12px">
+          <button class="btn plain" @click="confirmOpen = false">取消</button>
+          <button class="btn danger" :disabled="deleting" @click="doDelete">
+            {{ deleting ? '删除中…' : '确认永久删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -129,6 +152,8 @@ function applyFilters() {
 }
 
 const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).length)
+const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))
+const confirmOpen = ref(false)
 
 function toggleSelect(p) {
   const s = new Set(selected.value)
@@ -142,17 +167,19 @@ function selectAll() {
 }
 function selectLow() {
   selected.value = new Set(items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).map((p) => p.id))
-  if (!selected.value.size) toast('没有低于该分数的照片')
+  if (!selected.value.size) {
+    toast('没有低于该分数的照片')
+    return
+  }
+  band.value = 'low' // 页面同步筛选到低分
+  applyFilters()
+  toast(`已选中 ${selected.value.size} 张低分照片，页面已筛选`)
 }
 function onNavigate(newPhoto) {
   preview.value = newPhoto
 }
 
 async function doDelete() {
-  const n = selected.value.size
-  const rawNote = deleteRaw.value ? '，并联动删除同名 RAW/HEIC 伴生文件' : ''
-  if (!confirm(`确定删除所选 ${n} 张照片的源文件${rawNote}？\n此操作不可恢复！`)) return
-  if (!confirm(`再次确认：删除 ${n} 张照片的源文件？`)) return
   deleting.value = true
   try {
     delResult.value = await api('/api/gallery/delete', {
@@ -160,6 +187,7 @@ async function doDelete() {
       body: JSON.stringify({ ids: [...selected.value], delete_raw: deleteRaw.value }),
     })
     selected.value = new Set()
+    confirmOpen.value = false
     await load()
     refreshState()
   } catch (e) {
@@ -211,4 +239,21 @@ html.dark .thumb-wrap { background: #333; }
 .p-name { padding: 6px 8px 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-meta { padding: 2px 8px 8px; display: flex; gap: 6px; align-items: center; font-size: 12px; }
 .raw-tag { background: #3a2c12; color: #ffa300; }
+.cf-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 110;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.cf-card {
+  background: var(--card); border: 2px solid var(--danger); border-radius: 12px;
+  width: min(720px, 94vw); max-height: 86vh; display: flex; flex-direction: column;
+  padding: 16px 18px; box-shadow: 0 12px 48px rgba(0,0,0,0.4);
+}
+.cf-list { overflow-y: auto; flex: 1; margin: 8px 0; }
+.cf-row {
+  display: flex; align-items: baseline; gap: 10px; font-size: 13px;
+  padding: 5px 6px; border-bottom: 1px solid var(--line);
+}
+.cf-name { font-weight: 600; flex: none; width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-score { flex: none; width: 60px; color: var(--text-2); }
+.cf-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
 </style>

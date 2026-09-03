@@ -109,6 +109,23 @@
       <span class="muted">保存后立即生效；模型切换在下一批次生效</span>
     </div>
 
+    <div class="card">
+      <h3 class="title">数据库管理</h3>
+      <div class="row">
+        <label class="field">删除天数
+          <select v-model="purgeDays" style="width: 130px">
+            <option :value="7">7 天前</option>
+            <option :value="30">30 天前</option>
+            <option :value="90">90 天前</option>
+            <option :value="365">1 年前</option>
+          </select>
+        </label>
+        <button class="btn plain" :disabled="purging" @click="purgeDB">{{ purging ? '清理中…' : '🧹 清理记录' }}</button>
+        <span class="muted">删除该天数之前的批次、评分明细、评分缓存与 API 用量记录；配置与压缩缓存不受影响</span>
+      </div>
+      <div v-if="purgeMsg" class="muted" style="margin-top: 6px">{{ purgeMsg }}</div>
+    </div>
+
     <div class="card danger-zone">
       <h3 class="title">危险区</h3>
       <div class="row">
@@ -132,6 +149,23 @@ const saving = ref(false)
 const connState = ref(null)
 const clearing = ref(false)
 const clearMsg = ref('')
+const purging = ref(false)
+const purgeDays = ref(30)
+const purgeMsg = ref('')
+
+async function purgeDB() {
+  if (!confirm(`确定清理 ${purgeDays.value} 天前的记录？
+将删除：该时间之前的批次、评分明细、评分缓存、API 用量记录。
+配置与压缩缓存不受影响，此操作不可恢复！`)) return
+  purging.value = true
+  try {
+    const r = await api('/api/db/purge', { method: 'POST', body: JSON.stringify({ days: purgeDays.value }) })
+    purgeMsg.value = `✅ 已清理：批次 ${r.sessions}、评分明细 ${r.photos}、评分缓存 ${r.score_cache}、API 记录 ${r.spend_log}`
+  } catch (e) {
+    purgeMsg.value = '清理失败：' + e.message
+  }
+  purging.value = false
+}
 
 async function clearAll() {
   if (!confirm('确定清空全部数据？将删除：所有会话、评分明细、评分缓存、费用记录、压缩缓存。不影响源图与已归档照片。此操作不可恢复！')) return

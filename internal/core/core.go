@@ -499,12 +499,11 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 
 // GalleryDeleteResult 批量删除结果
 type GalleryDeleteResult struct {
-	Deleted     int      `json:"deleted"`      // 删除的照片源文件数
-	Raws        int      `json:"raws"`         // 联动删除的 RAW/伴生文件数
-	FreedMB     float64  `json:"freed_mb"`     // 释放空间
-	RowsRemoved int      `json:"rows_removed"` // 移除的照片记录数（含跨批次）
-	Missing     int      `json:"missing"`      // 源文件已不存在的
-	Errors      []string `json:"errors,omitempty"`
+	Deleted  int      `json:"deleted"`   // 删除的照片源文件数
+	Raws     int      `json:"raws"`      // 联动删除的 RAW/伴生文件数
+	FreedMB  float64  `json:"freed_mb"`  // 释放空间
+	Missing  int      `json:"missing"`   // 源文件已不存在的
+	Errors   []string `json:"errors,omitempty"`
 }
 
 // GalleryDelete 批量删除照片源文件（可选联动同名 RAW/HEIC 伴生文件），
@@ -539,19 +538,54 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult,
 					res.FreedMB += float64(rst.Size()) / 1048576
 					if err := os.Remove(cand); err == nil {
 						res.Raws++
-						// 联动删除的伴生文件如有照片记录（RAW 登记条目）一并移除
-						c.st.DeletePhotosBySrcPaths([]string{cand})
 					} else {
 						res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", filepath.Base(cand), err))
 					}
 				}
 			}
 		}
-		if err := c.st.DeletePhotosBySrcPaths([]string{src}); err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("%s 记录删除失败: %v", p.Filename, err))
-		}
-		res.RowsRemoved++
+		// 数据库记录与 API 用量记录保留（历史可查）；批量清理走设置页的库管理
 	}
+	return res, nil
+}
+
+// DBPurgeResult 按天清理结果
+type DBPurgeResult struct {
+	Days        int   `json:"days"`
+	Sessions    int64 `json:"sessions"`
+	Photos      int64 `json:"photos"`
+	ScoreCache  int64 `json:"score_cache"`
+	SpendLog    int64 `json:"spend_log"`
+}
+
+// PurgeOldRecords 手动清理 N 天前的数据库记录（批次/明细/评分缓存/API 用量），
+// 保留配置与压缩缓存目录（可随时重建）。days 最小为 1。
+func (c *Core) PurgeOldRecords(days int) (*DBPurgeResult, error) {
+	if c.Engine().IsRunning() {
+		return nil, fmt.Errorf("任务运行中，请先停止或等待完成")
+	}
+	if days < 1 {
+		days = 1
+	}
+	if days > 3650 {
+		days = 3650
+	}
+	res := &DBPurgeResult{Days: days}
+	var err error
+	if res.Photos, err = c.st.PurgePhotosOlderThan(days); err != nil {
+		return nil, err
+	}
+	if res.Sessions, err = c.st.PurgeSessionsOlderThan(days); err != nil {
+		return nil, err
+	}
+	if res.ScoreCache, err = c.st.PurgeScoreCacheOlderThan(days); err != nil {
+		return nil, err
+	}
+	if res.SpendLog, err = c.st.PurgeSpendLogOlderThan(days); err != nil {
+		return nil, err
+	}
+	logutil.Info("手动库管理：清理 %d 天前记录（批次 %d / 明细 %d / 评分缓存 %d / API 记录 %d）",
+		days, res.Sessions, res.Photos, res.ScoreCache, res.SpendLog)
 	return res, nil
 }
 

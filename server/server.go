@@ -53,6 +53,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
 	s.mux.HandleFunc("GET /api/gallery", s.handleGallery)
+	s.mux.HandleFunc("POST /api/db/purge", s.handleDBPurge)
 	s.mux.HandleFunc("POST /api/gallery/delete", s.handleGalleryDelete)
 	s.mux.HandleFunc("POST /api/session/rename", s.handleSessionRename)
 	s.mux.HandleFunc("POST /api/session/delete", s.handleSessionDelete)
@@ -195,6 +196,23 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, sum)
+}
+
+// handleDBPurge 手动清理 N 天前的数据库记录
+func (s *Server) handleDBPurge(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	res, err := s.core.PurgeOldRecords(req.Days)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 // handleGallery 图库列表
