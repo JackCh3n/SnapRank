@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -454,6 +455,104 @@ func (c *Core) CleanWorkCache() (int64, error) {
 	}
 	logutil.Info("已清理压缩缓存 %s（%.1f MB）", dir, float64(size)/1048576)
 	return size, nil
+}
+
+// GalleryItem 图库条目（跨批次按源文件去重）
+type GalleryItem struct {
+	*store.Photo
+	Present     bool     `json:"present"`                // 源文件是否还在
+	RawSiblings []string `json:"raw_siblings,omitempty"` // 同名 RAW/HEIC 伴生文件
+}
+
+var rawSiblingExts = []string{".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
+
+// Gallery 图库：所有批次照片按源文件去重
+func (c *Core) Gallery() ([]*GalleryItem, error) {
+	photos, err := c.st.GalleryList()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*GalleryItem, 0, len(photos))
+	for _, p := range photos {
+		it := &GalleryItem{Photo: p}
+		st, err := os.Stat(p.SrcPath)
+		if err != nil {
+			continue // 源文件已不在磁盘（被移走/删除）的不再进图库
+		}
+		it.Present = true
+		it.Size = st.Size()
+		base := strings.TrimSuffix(p.SrcPath, filepath.Ext(p.SrcPath))
+		selfExt := filepath.Ext(p.SrcPath)
+		for _, ext := range rawSiblingExts {
+			if strings.EqualFold(ext, selfExt) {
+				continue // 排除自身
+			}
+			cand := base + ext
+			if _, err := os.Stat(cand); err == nil {
+				it.RawSiblings = append(it.RawSiblings, cand)
+			}
+		}
+		out = append(out, it)
+	}
+	return out, nil
+}
+
+// GalleryDeleteResult 批量删除结果
+type GalleryDeleteResult struct {
+	Deleted     int      `json:"deleted"`      // 删除的照片源文件数
+	Raws        int      `json:"raws"`         // 联动删除的 RAW/伴生文件数
+	FreedMB     float64  `json:"freed_mb"`     // 释放空间
+	RowsRemoved int      `json:"rows_removed"` // 移除的照片记录数（含跨批次）
+	Missing     int      `json:"missing"`      // 源文件已不存在的
+	Errors      []string `json:"errors,omitempty"`
+}
+
+// GalleryDelete 批量删除照片源文件（可选联动同名 RAW/HEIC 伴生文件），
+// 并移除这些文件在所有批次中的记录。不可恢复，调用方须先经用户确认。
+func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("未选择照片")
+	}
+	res := &GalleryDeleteResult{}
+	for _, id := range ids {
+		p, err := c.st.GetPhoto(id)
+		if err != nil {
+			continue
+		}
+		src := p.SrcPath
+		st, statErr := os.Stat(src)
+		if statErr != nil {
+			res.Missing++
+		} else {
+			res.FreedMB += float64(st.Size()) / 1048576
+			if err := os.Remove(src); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.Filename, err))
+				continue
+			}
+			res.Deleted++
+		}
+		if deleteRaw {
+			base := strings.TrimSuffix(src, filepath.Ext(src))
+			for _, ext := range rawSiblingExts {
+				cand := base + ext
+				if rst, err := os.Stat(cand); err == nil && !rst.IsDir() {
+					res.FreedMB += float64(rst.Size()) / 1048576
+					if err := os.Remove(cand); err == nil {
+						res.Raws++
+						// 联动删除的伴生文件如有照片记录（RAW 登记条目）一并移除
+						c.st.DeletePhotosBySrcPaths([]string{cand})
+					} else {
+						res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", filepath.Base(cand), err))
+					}
+				}
+			}
+		}
+		if err := c.st.DeletePhotosBySrcPaths([]string{src}); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s 记录删除失败: %v", p.Filename, err))
+		}
+		res.RowsRemoved++
+	}
+	return res, nil
 }
 
 // ReportPath 最近会话的 report.csv（若已归档）

@@ -389,6 +389,41 @@ const photoCols = `id, session_id, fingerprint, src_path, filename, rel_path, si
  dims, tags, strength, weakness, model, prompt_version, clamped, source, override_bucket, archived_path,
  compressed_path, duration_ms, updated_at`
 
+// GalleryList 图库列表：跨批次按 src_path 去重（保留最新一条记录）
+func (s *Store) GalleryList() ([]*Photo, error) {
+	rows, err := s.db.Query(`SELECT ` + photoCols + ` FROM photos
+		WHERE id IN (SELECT MAX(id) FROM photos GROUP BY src_path)
+		ORDER BY score DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+// DeletePhotosBySrcPaths 删除指定源路径的全部照片记录（跨批次）
+func (s *Store) DeletePhotosBySrcPaths(srcPaths []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, sp := range srcPaths {
+		if _, err := tx.Exec(`DELETE FROM photos WHERE src_path=?`, sp); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // GetPhoto 按 ID 查询
 func (s *Store) GetPhoto(id int64) (*Photo, error) {
 	row := s.db.QueryRow(`SELECT `+photoCols+` FROM photos WHERE id=?`, id)

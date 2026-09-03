@@ -52,6 +52,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/stop", s.handleStop)
 	s.mux.HandleFunc("GET /api/summary", s.handleSummary)
 	s.mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	s.mux.HandleFunc("GET /api/gallery", s.handleGallery)
+	s.mux.HandleFunc("POST /api/gallery/delete", s.handleGalleryDelete)
 	s.mux.HandleFunc("POST /api/session/rename", s.handleSessionRename)
 	s.mux.HandleFunc("POST /api/session/delete", s.handleSessionDelete)
 	s.mux.HandleFunc("POST /api/clear-all", s.handleClearAll)
@@ -193,6 +195,34 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, sum)
+}
+
+// handleGallery 图库列表
+func (s *Server) handleGallery(w http.ResponseWriter, r *http.Request) {
+	items, err := s.core.Gallery()
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
+// handleGalleryDelete 批量删除照片源文件（危险操作）
+func (s *Server) handleGalleryDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs       []int64 `json:"ids"`
+		DeleteRaw bool    `json:"delete_raw"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	res, err := s.core.GalleryDelete(req.IDs, req.DeleteRaw)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 // handleSessionRename 批次重命名

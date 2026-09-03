@@ -30,6 +30,7 @@
       <main class="content">
         <RunView v-if="state.page === 'run'" />
         <ReviewView v-else-if="state.page === 'review'" />
+        <GalleryView v-else-if="state.page === 'gallery'" />
         <DetailView v-else-if="state.page === 'detail'" />
         <SettingsView v-else />
       </main>
@@ -44,12 +45,14 @@ import { onMounted } from 'vue'
 import { state, setTheme, connectSSE, refreshState } from './store.js'
 import RunView from './views/RunView.vue'
 import ReviewView from './views/ReviewView.vue'
+import GalleryView from './views/GalleryView.vue'
 import DetailView from './views/DetailView.vue'
 import SettingsView from './views/SettingsView.vue'
 
 const pages = [
   { key: 'run', icon: '📸', label: '运行' },
   { key: 'review', icon: '🗂️', label: '复核归档' },
+  { key: 'gallery', icon: '🖼️', label: '图库' },
   { key: 'detail', icon: '📋', label: '评分明细' },
   { key: 'settings', icon: '⚙️', label: '设置' },
 ]
