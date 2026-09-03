@@ -231,33 +231,20 @@ func (a *AnthropicProvider) isVolcano() bool {
 		strings.Contains(a.cfg.Provider.BaseURL, "/api/coding")
 }
 
-// volcanoExtraModels 火山 coding plan 实测可用但 /v1/models 未返回的模型
-var volcanoExtraModels = []string{
+// volcanoCodingPlanModels 火山 coding plan 订阅页面确认的全部模型
+// （API 调用直接使用页面短名，网关自动路由；/v1/models 不返回这些模型）
+var volcanoCodingPlanModels = []string{
+	"doubao-seed-2.0-lite",
+	"kimi-k2.7-code",
+	"minimax-m3",
+	"doubao-seed-2.1-turbo",
+	"deepseek-v4-flash",
+	"glm-5.3",
+	"doubao-seed-evolving",
+	"deepseek-v4-pro",
 	"glm-5.3-flash",
 }
 
-// volcanoCodingPlanModels 火山 coding plan 实测支持的视觉模型精选
-// （网关 /v1/models 返回全量 ark 目录 130+，其中大量模型不在 coding plan
-//
-//	内、调用会报 UnsupportedModel；该清单来自实测排查）
-var volcanoCodingPlanModels = []string{
-	"doubao-seed-2-0-pro-260215",
-	"doubao-seed-2-0-lite-260428",
-	"doubao-seed-2-0-mini-260428",
-	"doubao-seed-2-0-pro-260628",
-	"doubao-seed-2-1-pro-260628",
-	"doubao-seed-2-1-turbo-260628",
-	"doubao-seed-1-6-251015",
-	"doubao-seed-1-6-flash-250828",
-	"doubao-seed-1-6-lite-251015",
-	"doubao-seed-1-6-vision-250815",
-	"doubao-seed-1-6-thinking-250715",
-	"doubao-1-5-thinking-vision-pro-250428",
-	"doubao-1-5-vision-pro-250328",
-	"doubao-1.5-vision-lite-250315",
-	"doubao-vision-pro-32k-241028",
-	"doubao-vision-lite-32k-241015",
-}
 
 // ListModels 拉取模型清单（Anthropic /v1/models）
 func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
@@ -308,7 +295,7 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 		for _, id := range ids {
 			inList[id] = true
 		}
-		for _, extra := range volcanoExtraModels {
+		for _, extra := range volcanoCodingPlanModels {
 			if !inList[extra] {
 				ids = append(ids, extra)
 			}
