@@ -94,8 +94,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// modernc/sqlite 写并发需串行化
-	db.SetMaxOpenConns(1)
+	// WAL 模式允许并发读；写锁由 busy_timeout 兜底。
+	// 单连接会让图库等慢查询阻塞全部 API（设置页卡死根因），故放开。
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	s := &Store{db: db}
 	if err := s.init(); err != nil {
 		db.Close()

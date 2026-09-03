@@ -193,8 +193,6 @@ async function applyPreset(name) {
     const cfgNew = await api('/api/preset/apply', { method: 'POST', body: JSON.stringify({ name }) })
     state.config = cfgNew
     cfg.value = cfgNew
-    // 把预设的 Key 回填到输入框（脱敏显示由 placeholder 提示），避免"看不到 Key"的困惑
-    cfg.value.provider.api_key = ''
     connState.value = null
     toast(`已切换到预设「${name}」，URL 和 Key 已生效`)
   } catch (e) {
@@ -290,7 +288,6 @@ async function save(silent) {
   saving.value = true
   try {
     cfg.value = await api('/api/config', { method: 'POST', body: JSON.stringify(body) })
-    cfg.value.provider.api_key = '' // 脱敏回显不回填输入框
     visionPatterns.value = cfg.value.model.vision_patterns.join('\n')
     pricesJson.value = JSON.stringify(cfg.value.cost.prices, null, 1)
     saved.value = true

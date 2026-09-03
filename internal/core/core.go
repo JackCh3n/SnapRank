@@ -577,10 +577,16 @@ func (c *Core) PresetApply(name string) (*config.Config, error) {
 		if p.Name == name {
 			c.cfg.Provider.BaseURL = p.BaseURL
 			c.cfg.Provider.APIKey = p.APIKey
+			c.cfg.Provider.Protocol = p.Protocol
+			if c.cfg.Provider.Type == "mock" {
+				c.cfg.Provider.Type = "tokenrhythm"
+			}
 			if err := c.cfg.Save(); err != nil {
 				return nil, err
 			}
-			return c.GetConfig(), nil
+			// 返回真实 Key 配置（本机服务，前端 password 态遮盖）；
+			// 若返回脱敏值，前端保存时会把空 Key 回写导致切换失效
+			return c.cfg, nil
 		}
 	}
 	return nil, fmt.Errorf("预设不存在: %s", name)
