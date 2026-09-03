@@ -289,19 +289,13 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	for _, m := range out.Data {
 		ids = append(ids, m.ID)
 	}
-	// 火山 coding plan 的部分模型（如 glm-5.3-flash）不在 /v1/models 返回中但实测可调用
+	// 火山 coding plan：/v1/models 返回全量 ark 目录而非 coding plan 子集，
+	// 直接返回订阅页确认的模型列表（用户实际可用的全集）
 	if a.isVolcano() {
-		inList := map[string]bool{}
-		for _, id := range ids {
-			inList[id] = true
-		}
-		for _, extra := range volcanoCodingPlanModels {
-			if !inList[extra] {
-				ids = append(ids, extra)
-			}
-		}
+		logutil.Info("[models] 火山 coding plan 返回 %d 个模型", len(volcanoCodingPlanModels))
+		return volcanoCodingPlanModels, nil
 	}
-	logutil.Info("[models] 网关返回 %d 模型", len(ids))
+	logutil.Info("[models] 返回 %d 模型", len(ids))
 	return ids, nil
 }
 
