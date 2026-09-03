@@ -28,6 +28,9 @@ type Provider struct {
 	Type    string `yaml:"type" json:"type"`         // tokenrhythm(OpenAI兼容) | mock
 	BaseURL string `yaml:"base_url" json:"base_url"` // 平台 API 地址
 	APIKey  string `yaml:"api_key" json:"api_key"`
+	// 协议: chat=OpenAI Chat Completions（默认）| anthropic=Anthropic Messages
+	// 火山 coding plan 等网关两种都支持；Anthropic 官方走 anthropic
+	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
 // ModelConfig 模型相关配置
@@ -71,9 +74,10 @@ type PathsConfig struct {
 
 // PlatformPreset 平台接入预设（多套 url+key 快速切换）
 type PlatformPreset struct {
-	Name    string `yaml:"name" json:"name"`
-	BaseURL string `yaml:"base_url" json:"base_url"`
-	APIKey  string `yaml:"api_key" json:"api_key"`
+	Name     string `yaml:"name" json:"name"`
+	BaseURL  string `yaml:"base_url" json:"base_url"`
+	APIKey   string `yaml:"api_key" json:"api_key"`
+	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
 // Config 全量配置
@@ -190,6 +194,7 @@ func Default() *Config {
 				`seed-2\.1`,
 				`doubao.*vision|vision`,
 				`internvl|llava|gemma-3|step-1v|yi-vision`,
+				`seed-1\.6|kimi-(k2|latest)|glm-4\.[0-9]+v`,
 			},
 		},
 		Weights: Weights{Technique: 0.4, Composition: 0.3, Content: 0.2, Color: 0.1},
@@ -282,6 +287,11 @@ func (c *Config) normalize() {
 	d := Default()
 	if c.Provider.Type == "" {
 		c.Provider.Type = d.Provider.Type
+	}
+	switch c.Provider.Protocol {
+	case "", "chat", "anthropic":
+	default:
+		c.Provider.Protocol = "chat"
 	}
 	if c.Provider.BaseURL == "" {
 		c.Provider.BaseURL = d.Provider.BaseURL

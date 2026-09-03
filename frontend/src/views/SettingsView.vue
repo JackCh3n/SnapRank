@@ -26,8 +26,21 @@
           <input v-model="cfg.provider.base_url" placeholder="https://api.tokenrhythm.studio/v1" />
         </label>
         <label class="field grow">
-          API Key（留空保持不变）
-          <input v-model="cfg.provider.api_key" type="password" :placeholder="cfg.provider.api_key ? `已设置（${cfg.provider.api_key}）` : 'sk-...'" />
+          协议
+          <select v-model="cfg.provider.protocol" style="width: 170px"
+            title="火山 coding plan 等网关两种都支持；Anthropic 官方选 anthropic">
+            <option value="chat">Chat Completions</option>
+            <option value="anthropic">Anthropic Messages</option>
+          </select>
+        </label>
+        <label class="field">
+          API Key（点击输入框右侧图标可显示/隐藏）
+          <div style="display: flex; gap: 6px">
+            <input v-model="cfg.provider.api_key" :type="showKey ? 'text' : 'password'"
+              :placeholder="cfg.provider.api_key ? `已设置（${cfg.provider.api_key}）` : 'sk-...'" style="flex: 1" />
+            <button class="btn plain small" :title="showKey ? '隐藏 Key' : '显示 Key'"
+              @click="showKey = !showKey">{{ showKey ? '🙈' : '👁' }}</button>
+          </div>
         </label>
       </div>
       <div class="row" style="margin-top: 12px">
@@ -164,12 +177,13 @@ const connState = ref(null)
 const clearing = ref(false)
 const clearMsg = ref('')
 const presetSaveName = ref('')
+const showKey = ref(false)
 
 const presets = computed(() => (state.config && state.config.presets) || [])
 const activePresetName = computed(() => {
   const c = state.config
   if (!c) return ''
-  const hit = presets.value.find((p) => p.base_url === c.provider.base_url && p.api_key === c.provider.api_key)
+  const hit = presets.value.find((p) => p.base_url === c.provider.base_url)
   return hit ? hit.name : ''
 })
 
@@ -179,9 +193,10 @@ async function applyPreset(name) {
     const cfgNew = await api('/api/preset/apply', { method: 'POST', body: JSON.stringify({ name }) })
     state.config = cfgNew
     cfg.value = cfgNew
+    // 把预设的 Key 回填到输入框（脱敏显示由 placeholder 提示），避免"看不到 Key"的困惑
     cfg.value.provider.api_key = ''
     connState.value = null
-    toast(`已切换到预设「${name}」，URL 和 Key 已填入`)
+    toast(`已切换到预设「${name}」，URL 和 Key 已生效`)
   } catch (e) {
     toast(e.message, true)
   }
@@ -206,7 +221,7 @@ async function saveAsPreset() {
   try {
     await api('/api/preset/upsert', {
       method: 'POST',
-      body: JSON.stringify({ name, base_url: c.provider.base_url, api_key: c.provider.api_key || '' }),
+      body: JSON.stringify({ name, base_url: c.provider.base_url, api_key: c.provider.api_key || '', protocol: c.provider.protocol || 'chat' }),
     })
     const st = await api('/api/state')
     state.config = st.config
@@ -265,7 +280,7 @@ async function save(silent) {
   silent = silent === true // @click 直接绑定时会误传 MouseEvent
   const c = cfg.value
   const body = {
-    provider: { ...c.provider, api_key: c.provider.api_key || '' },
+    provider: { ...c.provider, api_key: c.provider.api_key || '', protocol: c.provider.protocol || 'chat' },
     model: { ...c.model, vision_patterns: visionPatterns.value.split('\n').map((s) => s.trim()).filter(Boolean) },
     score: { ...c.score, temperature: +c.score.temperature },
     pipeline: { ...c.pipeline },

@@ -3,12 +3,15 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -50,6 +53,9 @@ func New(cfg *config.Config) (Provider, error) {
 	case "mock":
 		return &Mock{}, nil
 	default:
+		if cfg.Provider.Protocol == "anthropic" {
+			return &AnthropicProvider{cfg: cfg}, nil
+		}
 		return &TokenRhythm{cfg: cfg, client: newClient(cfg)}, nil
 	}
 }
@@ -170,6 +176,133 @@ func classifyErr(err error) error {
 		}
 	}
 	return err
+}
+
+// ---------- Anthropic Messages（/v1/messages） ----------
+
+// AnthropicProvider Anthropic Messages 协议实现（/v1/messages）。
+// 适用于 Anthropic 官方 API 及兼容该协议的网关（如火山 coding plan）。
+type AnthropicProvider struct {
+	cfg *config.Config
+}
+
+// Name 平台名
+func (a *AnthropicProvider) Name() string { return "anthropic" }
+
+// anthropicResp /v1/messages 响应
+type anthropicResp struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// ListModels 拉取模型清单（Anthropic /v1/models）
+func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	base := strings.TrimRight(a.cfg.Provider.BaseURL, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", base+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("models %d: %s", resp.StatusCode, truncateStr(string(body), 200))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
+// Score 调用 Anthropic Messages 协议评分
+func (a *AnthropicProvider) Score(ctx context.Context, model string, req ScoreRequest) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
+	defer cancel()
+	base := strings.TrimRight(a.cfg.Provider.BaseURL, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	payload := map[string]interface{}{
+		"model":      model,
+		"max_tokens": req.MaxTokens,
+		"messages": []map[string]interface{}{{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "image", "source": map[string]string{
+					"type": "base64", "media_type": "image/jpeg", "data": req.ImageB64,
+				}},
+				{"type": "text", "text": req.Prompt},
+			},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req2, err := http.NewRequestWithContext(ctx, "POST", base+"/messages", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req2.Header.Set("content-type", "application/json")
+	req2.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	req2.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		return "", classifyErr(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("messages %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
+	}
+	var out anthropicResp
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	if out.Error != nil {
+		return "", fmt.Errorf("anthropic: %s", out.Error.Message)
+	}
+	// 拼接 text 块（思考型模型可能夹带 thinking 块，跳过）
+	var sb strings.Builder
+	for _, c := range out.Content {
+		if c.Type == "text" {
+			sb.WriteString(c.Text)
+		}
+	}
+	content := sb.String()
+	if strings.TrimSpace(content) == "" {
+		return "", fmt.Errorf("模型输出为空（可能 max_tokens 被推理耗尽），请增大 max_tokens")
+	}
+	return content, nil
+}
+
+func truncateStr(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // ---------- mock（离线演示/测试） ----------
