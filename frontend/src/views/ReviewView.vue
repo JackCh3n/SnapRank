@@ -222,10 +222,6 @@ function onNavigate(newPhoto) {
   preview.value = newPhoto
 }
 
-function onNavigate(newPhoto) {
-  preview.value = newPhoto
-}
-
 async function rescoreOne(p) {
   try {
     await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
