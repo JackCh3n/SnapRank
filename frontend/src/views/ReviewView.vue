@@ -79,8 +79,8 @@
             <select class="bucket-sel" :value="p.override_bucket || autoBucket(p)" @change="setBucket(p, $event.target.value)">
               <option v-for="b in bucketNames" :key="b" :value="b">{{ b }}</option>
             </select>
-            <button class="btn plain small" :disabled="state.running" title="查看详情并复检"
-              @click="preview = p">↻ 复检</button>
+            <button class="btn plain small" :disabled="state.running" title="重新调用 AI 评分（忽略缓存）"
+              @click="rescoreOne(p)">↻ 复检</button>
           </div>
         </div>
       </div>
@@ -220,6 +220,19 @@ function closePreview() {
 
 function onNavigate(newPhoto) {
   preview.value = newPhoto
+}
+
+function onNavigate(newPhoto) {
+  preview.value = newPhoto
+}
+
+async function rescoreOne(p) {
+  try {
+    await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
+    toast(`已提交复检：${p.filename}，完成后自动刷新`)
+  } catch (e) {
+    toast(e.message, true)
+  }
 }
 
 async function rescoreAllFailed() {

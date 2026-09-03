@@ -85,7 +85,7 @@
             <td class="clip">{{ p.updated_at }}</td>
             <td class="clip" :title="p.error">{{ p.error || p.weakness }}</td>
             <td><button v-if="p.status === 'parse_fail' || p.status === 'failed'" class="btn plain small"
-              :disabled="running" title="查看详情并复检" @click="preview = p">↻ 复检</button></td>
+              :disabled="running" title="重新调用 AI 评分（忽略缓存）" @click="onRescore(p)">↻ 复检</button></td>
           </tr>
         </tbody>
       </table>
@@ -169,6 +169,19 @@ function arrow(k) {
 function closePreview() {
   preview.value = null
   load() // 复检可能已改变状态，关闭时刷新
+}
+
+async function onRescore(p) {
+  running.value = true
+  try {
+    await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
+    toast(`已提交复检：${p.filename}，完成后自动刷新`)
+    preview.value = null
+    setTimeout(() => load(), 2500)
+  } catch (e) {
+    toast(e.message, true)
+  }
+  running.value = false
 }
 
 function onNavigate(newPhoto) {
