@@ -220,15 +220,16 @@ func (s *Server) handleDBPurge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePresetUpsert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		BaseURL string `json:"base_url"`
-		APIKey  string `json:"api_key"`
+		Name     string `json:"name"`
+		BaseURL  string `json:"base_url"`
+		APIKey   string `json:"api_key"`
+		Protocol string `json:"protocol"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	if err := s.core.PresetUpsert(req.Name, req.BaseURL, req.APIKey); err != nil {
+	if err := s.core.PresetUpsert(req.Name, req.BaseURL, req.APIKey, req.Protocol); err != nil {
 		writeErr(w, 400, err)
 		return
 	}

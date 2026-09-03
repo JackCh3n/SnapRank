@@ -207,6 +207,53 @@ type anthropicResp struct {
 	} `json:"error,omitempty"`
 }
 
+// anthropicHTTPClient 强制 HTTP/1.1：火山网关的 WAF 对 HTTP/2 请求
+// 会返回误导性的 AuthHeader 400，降级 1.1 后正常
+var anthropicHTTPClient = &http.Client{}
+
+func init() {
+	// 空 Transport 默认不启用 HTTP/2（ForceAttemptHTTP2 只在 DefaultClient 生效）
+	anthropicHTTPClient.Transport = &http.Transport{}
+}
+
+// setAuth 按平台设置认证头：火山只认 Bearer，官方认 x-api-key
+func (a *AnthropicProvider) setAuth(req *http.Request) {
+	if a.isVolcano() {
+		req.Header.Set("Authorization", "Bearer "+a.cfg.Provider.APIKey)
+	} else {
+		req.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	}
+}
+
+// isVolcano 是否火山 anthropic 兼容网关（认证方式与模型目录与官方不同）
+func (a *AnthropicProvider) isVolcano() bool {
+	return strings.Contains(a.cfg.Provider.BaseURL, "ark.cn-beijing.volces.com") ||
+		strings.Contains(a.cfg.Provider.BaseURL, "/api/coding")
+}
+
+// volcanoCodingPlanModels 火山 coding plan 实测支持的视觉模型精选
+// （网关 /v1/models 返回全量 ark 目录 130+，其中大量模型不在 coding plan
+//
+//	内、调用会报 UnsupportedModel；该清单来自实测排查）
+var volcanoCodingPlanModels = []string{
+	"doubao-seed-2-0-pro-260215",
+	"doubao-seed-2-0-lite-260428",
+	"doubao-seed-2-0-mini-260428",
+	"doubao-seed-2-0-pro-260628",
+	"doubao-seed-2-1-pro-260628",
+	"doubao-seed-2-1-turbo-260628",
+	"doubao-seed-1-6-251015",
+	"doubao-seed-1-6-flash-250828",
+	"doubao-seed-1-6-lite-251015",
+	"doubao-seed-1-6-vision-250815",
+	"doubao-seed-1-6-thinking-250715",
+	"doubao-1-5-thinking-vision-pro-250428",
+	"doubao-1-5-vision-pro-250328",
+	"doubao-1.5-vision-lite-250315",
+	"doubao-vision-pro-32k-241028",
+	"doubao-vision-lite-32k-241015",
+}
+
 // ListModels 拉取模型清单（Anthropic /v1/models）
 func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -219,9 +266,17 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	if a.isVolcano() {
+		// 火山 anthropic 网关只认 Bearer（x-api-key 与 Authorization 并存会报 AuthHeader 冲突）
+		req.Header.Set("Authorization", "Bearer "+a.cfg.Provider.APIKey)
+		logutil.Info("[models] 火山分支: Bearer 认证")
+	} else {
+		req.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+		logutil.Info("[models] 官方分支: x-api-key 认证")
+	}
 	req.Header.Set("anthropic-version", "2023-06-01")
-	resp, err := http.DefaultClient.Do(req)
+	logutil.Info("[models] url=%s 协议=%s", base+"/models", a.cfg.Provider.Protocol)
+	resp, err := anthropicHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +296,26 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	ids := make([]string, 0, len(out.Data))
 	for _, m := range out.Data {
 		ids = append(ids, m.ID)
+	}
+	logutil.Info("[models] 网关返回 %d 模型", len(ids))
+	// 火山 coding plan 网关的 /v1/models 返回全量 ark 目录（含大量不在
+	// coding plan 内的模型，调用会报 UnsupportedModel）；按实测清单过滤
+	if a.isVolcano() {
+		inPlan := map[string]bool{}
+		for _, m := range volcanoCodingPlanModels {
+			inPlan[m] = true
+		}
+		filtered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if inPlan[id] {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			logutil.Info("[models] coding plan 过滤后 %d", len(filtered))
+			return filtered, nil
+		}
+		logutil.Info("[models] 过滤后为 0，退回全量 %d", len(ids))
 	}
 	return ids, nil
 }
@@ -272,9 +347,9 @@ func (a *AnthropicProvider) Score(ctx context.Context, model string, req ScoreRe
 		return "", err
 	}
 	req2.Header.Set("content-type", "application/json")
-	req2.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	a.setAuth(req2)
 	req2.Header.Set("anthropic-version", "2023-06-01")
-	resp, err := http.DefaultClient.Do(req2)
+	resp, err := anthropicHTTPClient.Do(req2)
 	if err != nil {
 		return "", classifyErr(err)
 	}

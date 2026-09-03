@@ -537,7 +537,7 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult,
 }
 
 // PresetUpsert 保存平台预设（同名覆盖；apiKey 为空保持原值）
-func (c *Core) PresetUpsert(name, baseURL, apiKey string) error {
+func (c *Core) PresetUpsert(name, baseURL, apiKey, protocol string) error {
 	if name == "" {
 		return fmt.Errorf("预设名不能为空")
 	}
@@ -546,13 +546,14 @@ func (c *Core) PresetUpsert(name, baseURL, apiKey string) error {
 	for i := range c.cfg.Presets {
 		if c.cfg.Presets[i].Name == name {
 			c.cfg.Presets[i].BaseURL = baseURL
+			c.cfg.Presets[i].Protocol = protocol
 			if apiKey != "" {
 				c.cfg.Presets[i].APIKey = apiKey
 			}
 			return c.cfg.Save()
 		}
 	}
-	c.cfg.Presets = append(c.cfg.Presets, config.PlatformPreset{Name: name, BaseURL: baseURL, APIKey: apiKey})
+	c.cfg.Presets = append(c.cfg.Presets, config.PlatformPreset{Name: name, BaseURL: baseURL, APIKey: apiKey, Protocol: protocol})
 	return c.cfg.Save()
 }
 
@@ -565,6 +566,10 @@ func (c *Core) PresetApply(name string) (*config.Config, error) {
 			c.cfg.Provider.BaseURL = p.BaseURL
 			c.cfg.Provider.APIKey = p.APIKey
 			c.cfg.Provider.Protocol = p.Protocol
+			// 预设未记录协议时从 base_url 推断（火山 /api/coding = anthropic）
+			if c.cfg.Provider.Protocol == "" && strings.Contains(p.BaseURL, "/api/coding") {
+				c.cfg.Provider.Protocol = "anthropic"
+			}
 			if c.cfg.Provider.Type == "mock" {
 				c.cfg.Provider.Type = "tokenrhythm"
 			}
