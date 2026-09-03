@@ -4,7 +4,8 @@
       <!-- 照片区 -->
       <div class="pm-photo">
         <button v-if="hasPrev" class="pm-nav prev" title="上一张（←）" @click.stop="nav(-1)">‹</button>
-        <img :src="`/api/thumb?id=${p.id}`" @click="$emit('close')" />
+        <img v-if="!noThumb" :src="`/api/thumb?id=${p.id}`" @error="noThumb = true" @click="$emit('close')" />
+        <div v-else class="pm-noimg">缓存命中，无压缩图预览</div>
         <button v-if="hasNext" class="pm-nav next" title="下一张（→）" @click.stop="nav(1)">›</button>
         <span class="pm-badge" :class="badgeClass">{{ badgeText }}</span>
         <button class="btn plain small pm-close" @click="$emit('close')">✕</button>
@@ -111,6 +112,7 @@ const p = computed(() => props.photo)
 const sharing = ref(false)
 const copyHint = ref('📋 复制分享卡片')
 const shareUrl = ref('')
+const noThumb = ref(false)
 
 const canRescore = computed(() => ['parse_fail', 'failed'].includes(p.value.status))
 const badgeText = computed(() => {
@@ -165,6 +167,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 watch(() => p.value && p.value.id, () => {
   shareUrl.value = ''
   copyHint.value = '📋 复制分享卡片'
+  noThumb.value = false
   resetRescore()
 })
 
@@ -403,6 +406,10 @@ async function copyShareCard() {
 }
 .pm-photo { position: relative; background: #000; display: flex; justify-content: center; }
 .pm-photo img { max-width: 100%; max-height: 52vh; object-fit: contain; display: block; cursor: zoom-out; }
+.pm-noimg {
+  min-height: 200px; width: 100%; display: flex; align-items: center; justify-content: center;
+  color: var(--text-2); font-size: 14px;
+}
 .pm-badge {
   position: absolute; left: 14px; bottom: 14px; padding: 4px 14px;
   border-radius: 999px; color: #fff; font-weight: 700; font-size: 15px; background: #888;

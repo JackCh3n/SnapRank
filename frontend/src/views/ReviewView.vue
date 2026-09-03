@@ -57,7 +57,8 @@
         <div v-for="p in photos" :key="p.id" class="photo-card">
           <div class="thumb-wrap clickable" :class="{ 'parse-fail': p.status === 'parse_fail' }"
             @click="preview = p" title="点击查看大图与评分详情">
-            <img :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
+            <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
+            <div v-else class="no-thumb">缓存命中<br />无压缩图</div>
             <span class="score-badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
           </div>
           <div class="p-name" :title="p.src_path">{{ p.filename }}</div>
@@ -262,6 +263,8 @@ function autoBucket(p) {
 
 function thumbFail(p) { p._noThumb = true }
 
+// 缓存命中但无压缩图的照片（老批次）正常参与列表展示
+
 const scope = ref('scored')
 
 function badgeText(p) {
@@ -376,6 +379,10 @@ html.dark .thumb-wrap { background: #333; }
 .card-actions .bucket-sel { margin: 0; flex: 1; min-width: 0; }
 .parse-fail { outline: 2px solid var(--danger); outline-offset: -2px; border-radius: 10px; }
 .scope-sel { font-size: 13px; padding: 4px 8px; vertical-align: middle; max-width: 240px; }
+.no-thumb {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  color: var(--text-2); font-size: 12px; text-align: center; background: var(--card-2);
+}
 .thumb-wrap.clickable { cursor: zoom-in; }
 
 </style>

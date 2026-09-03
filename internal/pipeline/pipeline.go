@@ -583,15 +583,47 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		}
 		queue = append(queue, p)
 	}
+	// ---------- 阶段〇：评分缓存先行 ----------
+	// 同指纹+模型+版本已评分过的照片直接复用结果，跳过压缩与调用
+	// （追加照片到同一目录再评分时，老照片不会重新压缩）
+	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", "compressed")
+	cacheHits := 0
+	if cfg.Score.ReuseScores {
+		var remaining []*store.Photo
+		for _, p := range queue {
+			if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
+				score := scorer.WeightedScore(ent.Dims, cfg.WeightsNormalized())
+				e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
+				// 压缩图若在共享缓存中存在则登记（老批次可能没有）
+				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
+				if _, serr := os.Stat(cp); serr == nil {
+					e.store.SetPhotoCompressed(p.ID, cp)
+				}
+				e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
+				cacheHits++
+				continue
+			}
+			remaining = append(remaining, p)
+		}
+		queue = remaining
+		if cacheHits > 0 {
+			logutil.Info("评分缓存命中 %d 张，跳过压缩与调用", cacheHits)
+		}
+	}
+
 	// ---------- 阶段一：压缩（全部压完再进入评分） ----------
-	total := len(queue)
-	e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: total}})
-	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", sessID, "compressed")
-	if stopped := e.compressAll(ctx, eng, queue, cacheDir, sessID, total); stopped {
+	totalAll := cacheHits + len(queue) // 评分阶段进度分母含缓存命中
+	if len(queue) > 0 {
+		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: len(queue)}})
+	}
+	if stopped := e.compressAll(ctx, eng, queue, cacheDir, sessID, len(queue)); stopped {
 		return true
 	}
 
 	// ---------- 阶段二：评分（仅压缩成功的照片） ----------
+	if len(queue) > 0 {
+		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "score", Total: totalAll}})
+	}
 	var scoreQueue []*store.Photo
 	for _, p := range queue {
 		if p.Status != store.StatusBadImage {
@@ -613,7 +645,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 					continue
 				}
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				prog := e.scoreOne(ctx, prov, model, p, cp, total, &doneCount)
+				prog := e.scoreOne(ctx, prov, model, p, cp, totalAll, &doneCount)
 				e.Bus.Publish(Event{Type: "progress", Data: prog})
 			}
 		}()
