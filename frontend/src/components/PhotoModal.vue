@@ -59,6 +59,26 @@
           </div>
         </div>
 
+        <!-- 评分历史（多模型 / 多次重评） -->
+        <div class="pm-history" v-if="history.length">
+          <div class="pm-h-head">
+            <b>评分历史</b>
+            <span class="tag">{{ history.length }} 次</span>
+            <span class="pm-h-models">
+              <span v-for="m in historyModels" :key="m" class="tag">{{ m }}</span>
+            </span>
+          </div>
+          <div class="pm-h-row" v-for="(h, i) in history" :key="i">
+            <span class="pm-h-score">{{ h.score.toFixed(1) }}</span>
+            <span class="tag">{{ h.model || '—' }}</span>
+            <span class="pm-h-src" :class="{ cached: h.source === 'cache' }">{{ h.source === 'cache' ? '缓存' : 'API' }}</span>
+            <span class="pm-h-dims" v-if="h.dims">
+              技 {{ h.dims.technique.toFixed(1) }} · 构 {{ h.dims.composition.toFixed(1) }} · 内 {{ h.dims.content.toFixed(1) }} · 色 {{ h.dims.color.toFixed(1) }}
+            </span>
+            <span class="pm-h-time">{{ h.created_at }}</span>
+          </div>
+        </div>
+
         <!-- 复检进行中：进度态 -->
         <div v-if="rescoring" class="pm-rescore">
           <div class="pm-rescore-head">
@@ -161,15 +181,32 @@ function onKey(e) {
   if (e.key === 'ArrowLeft') nav(-1)
   if (e.key === 'ArrowRight') nav(1)
 }
-onMounted(() => window.addEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  loadHistory() // 首次打开弹窗加载评分历史
+})
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
+// ---------- 评分历史 ----------
+const history = ref([])
+const historyModels = computed(() => [...new Set(history.value.map((h) => h.model).filter(Boolean))])
+async function loadHistory() {
+  if (!p.value || !p.value.id) { history.value = []; return }
+  try {
+    history.value = await api(`/api/photo/scores?id=${p.value.id}`)
+  } catch {
+    history.value = []
+  }
+}
+
 // 重置分享状态（换照片时）
+// 注意：不能加 immediate——回调同步执行会碰到下方复检进度状态的 TDZ
 watch(() => p.value && p.value.id, () => {
   shareUrl.value = ''
   copyHint.value = '📋 复制分享卡片'
   noThumb.value = false
   resetRescore()
+  loadHistory()
 })
 
 // ---------- 复检进度 ----------
@@ -245,6 +282,7 @@ async function startRescore() {
 }
 
 function finishRescore() {
+  loadHistory() // 重评结果已追加一条历史
   setTimeout(() => {
     if (rescoreEs) { rescoreEs.close(); rescoreEs = null }
     rescoring.value = false
@@ -462,6 +500,19 @@ async function copyShareCard() {
 .pm-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
 .pm-actions { display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 14px; }
+
+.pm-history { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.pm-h-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.pm-h-models { display: flex; gap: 4px; flex-wrap: wrap; }
+.pm-h-row {
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+  background: var(--card-2); border-radius: 8px; padding: 6px 10px;
+}
+.pm-h-score { font-weight: 800; font-size: 15px; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 30px; }
+.pm-h-src { color: var(--text-2); flex: none; }
+.pm-h-src.cached { color: var(--warn); }
+.pm-h-dims { color: var(--text-2); margin-left: auto; font-variant-numeric: tabular-nums; }
+.pm-h-time { color: var(--text-2); font-size: 11px; flex: none; }
 
 .pm-rescore { border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
 .pm-rescore-head { display: flex; align-items: center; gap: 10px; }
