@@ -212,9 +212,10 @@ func (c *Core) GetCurrentModel() string {
 
 // SetCurrentModel 切换当前模型：下一次“开始评分”时生效（批次内锁定）
 func (c *Core) SetCurrentModel(id string) error {
-	if id == "" {
+	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("模型 ID 不能为空")
 	}
+	id = strings.TrimSpace(id)
 	c.mu.Lock()
 	c.curModel = id
 	c.mu.Unlock()

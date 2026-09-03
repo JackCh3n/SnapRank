@@ -268,9 +268,14 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
 		return nil, errors.New("尚未配置 API Key（可在设置切换 mock 模式离线体验）")
 	}
-	model := opts.Model
+	model := strings.TrimSpace(opts.Model)
 	if model == "" {
-		model = cfg.Model.Default
+		model = strings.TrimSpace(cfg.Model.Default)
+	}
+	if model == "" && len(cfg.Model.VisionPatterns) > 0 {
+		// 配置默认模型为空：从 Provider 拉取首个可用模型兜底由 UI 层处理；
+		// 此处直接报错避免空模型导致评分卡死
+		return nil, errors.New("未选择打分模型：请在运行页选择模型或到设置页配置默认模型")
 	}
 
 	items, _, err := e.Scan(opts.Dir, opts.Formats)

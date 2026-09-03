@@ -424,24 +424,35 @@ async function loadModels() {
 
 // 开始评分：任务创建后立即返回（后台排队执行），可继续添加新任务
 async function doStart(sample) {
+  // 未选模型时兜底为当前模型，不传空值覆盖有效默认（避免评分卡死）
+  if (!state.selModel && state.currentModel) state.selModel = state.currentModel
+  if (state.selModel && state.selModel !== state.currentModel) {
+    starting.value = true
+    try {
+      await api('/api/model', { method: 'POST', body: JSON.stringify({ id: state.selModel }) })
+      state.currentModel = state.selModel
+    } catch (e) {
+      toast('切换模型失败：' + e.message, true)
+      starting.value = false
+      return
+    }
+    starting.value = false
+  }
   starting.value = true
   try {
-    if (state.selModel && state.selModel !== state.currentModel) {
-      await api('/api/model', { method: 'POST', body: JSON.stringify({ id: state.selModel }) })
-    }
     const r = await api('/api/start', {
       method: 'POST',
       body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value }),
     })
     selectedTask.value = r.session_id
     taskOf(r.session_id)
+    state.currentModel = r.model || state.currentModel
     const queued = state.queue.queued.includes(r.session_id)
     if (r.resumed) {
-      const locked = state.selModel && r.model && state.selModel !== r.model
-      toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}${locked ? `；批次锁定模型 ${r.model}，本次选择未生效` : ''}`)
+      toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
     }
     else if (queued) toast(`任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
-    else toast(`任务已开始：${r.session_id}`)
+    else toast(`任务已开始：${r.session_id}（模型 ${r.model}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)
