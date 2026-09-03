@@ -231,6 +231,11 @@ func (a *AnthropicProvider) isVolcano() bool {
 		strings.Contains(a.cfg.Provider.BaseURL, "/api/coding")
 }
 
+// volcanoExtraModels 火山 coding plan 实测可用但 /v1/models 未返回的模型
+var volcanoExtraModels = []string{
+	"glm-5.3-flash",
+}
+
 // volcanoCodingPlanModels 火山 coding plan 实测支持的视觉模型精选
 // （网关 /v1/models 返回全量 ark 目录 130+，其中大量模型不在 coding plan
 //
@@ -296,6 +301,18 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	ids := make([]string, 0, len(out.Data))
 	for _, m := range out.Data {
 		ids = append(ids, m.ID)
+	}
+	// 火山 coding plan 的部分模型（如 glm-5.3-flash）不在 /v1/models 返回中但实测可调用
+	if a.isVolcano() {
+		inList := map[string]bool{}
+		for _, id := range ids {
+			inList[id] = true
+		}
+		for _, extra := range volcanoExtraModels {
+			if !inList[extra] {
+				ids = append(ids, extra)
+			}
+		}
 	}
 	logutil.Info("[models] 网关返回 %d 模型", len(ids))
 	return ids, nil
