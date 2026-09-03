@@ -21,6 +21,8 @@
         <div class="row">
           <button class="btn plain small" @click="selectAll">{{ selected.size ? '取消全选' : '全选当前筛选' }}</button>
           <button class="btn plain small" :disabled="!lowCount" @click="selectLow">选择低分 &lt; {{ lowThreshold }} 分（{{ lowCount }}）</button>
+          <button class="btn small" :disabled="!rescorableCount || rescoring" title="忽略缓存，用当前所选模型重新调用 AI 评分"
+            @click="rescoreSelected">↻ 重评所选（{{ rescorableCount }}）</button>
           <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
             🗑️ 删除所选（{{ selected.size }}）
           </button>
@@ -34,6 +36,14 @@
           <input v-model="deleteRaw" type="checkbox" /> 同时删除同名 RAW/HEIC 伴生文件（.raf/.cr2/.nef…）
         </label>
         <span class="muted">已选 {{ selected.size }} 张 · 将删除源文件，不可恢复</span>
+        <div v-if="rescoring" class="row" style="flex: 1; min-width: 220px; align-items: center">
+          <div class="progress-track" style="flex: 1">
+            <div class="progress-fill" :style="{ width: rescorePct + '%' }"></div>
+          </div>
+          <span class="muted" style="flex: none">
+            重评中 {{ rescoreDone }}/{{ rescoreTotal }}<span v-if="rescoreFailed" class="error-text">（失败 {{ rescoreFailed }}）</span>
+          </span>
+        </div>
       </div>
       <div v-if="delResult" class="muted" style="margin-top: 6px">
         ✅ 已删除 {{ delResult.deleted }} 张源文件、{{ delResult.raws }} 个 RAW/伴生文件（释放
@@ -183,6 +193,73 @@ function onNavigate(newPhoto) {
   preview.value = newPhoto
 }
 
+// ---------- 批量重评（跨批次：后端按所属批次分组入队） ----------
+const rescoring = ref(false)
+const rescoreDone = ref(0)
+const rescoreFailed = ref(0)
+const rescoreTotal = ref(0)
+const rescorePct = computed(() => (rescoreTotal.value ? Math.round((rescoreDone.value / rescoreTotal.value) * 100) : 0))
+let rescoreEs = null
+let pendingKeys = new Set() // 待完成回报：session_id|filename
+
+const NOK_RESCORE = ['unsupported', 'bad_image']
+function rescorable(p) {
+  return p.present && !NOK_RESCORE.includes(p.status)
+}
+const rescorableCount = computed(() => items.value.filter((p) => selected.value.has(p.id) && rescorable(p)).length)
+
+async function rescoreSelected() {
+  const targets = items.value.filter((p) => selected.value.has(p.id) && rescorable(p))
+  if (!targets.length) {
+    toast('所选照片中没有可重评的（源文件已删或格式不支持）')
+    return
+  }
+  rescoring.value = true
+  rescoreDone.value = 0
+  rescoreFailed.value = 0
+  rescoreTotal.value = targets.length
+  pendingKeys = new Set(targets.map((p) => `${p.session_id}|${p.filename}`))
+  try {
+    await api('/api/rescore', {
+      method: 'POST',
+      body: JSON.stringify({ ids: targets.map((p) => p.id), force: true }),
+    })
+  } catch (e) {
+    toast(e.message, true)
+    stopRescoreWatch()
+    rescoring.value = false
+    return
+  }
+  // SSE 按批次+文件名匹配各张照片的重评进度
+  rescoreEs = new EventSource('/api/events')
+  rescoreEs.addEventListener('progress', (e) => {
+    try {
+      const d = JSON.parse(e.data)
+      const key = `${d.session_id}|${d.file}`
+      if (!pendingKeys.has(key)) return
+      pendingKeys.delete(key)
+      rescoreDone.value++
+      if (d.status === 'parse_fail' || d.status === 'failed') rescoreFailed.value++
+      if (pendingKeys.size === 0) finishRescore()
+    } catch { /* 忽略解析错误 */ }
+  })
+  rescoreEs.addEventListener('error', () => { /* 断线由浏览器重连 */ })
+}
+
+function finishRescore() {
+  const ok = rescoreDone.value - rescoreFailed.value
+  const failTxt = rescoreFailed.value ? `，${rescoreFailed.value} 张失败可再次重评` : ''
+  toast(`重评完成：${ok} 张成功${failTxt}`)
+  stopRescoreWatch()
+  rescoring.value = false
+  load()
+}
+
+function stopRescoreWatch() {
+  if (rescoreEs) { rescoreEs.close(); rescoreEs = null }
+  pendingKeys = new Set()
+}
+
 // 仅移除数据库记录（源文件保留或已不存在）
 async function removeRecords() {
   try {
@@ -232,7 +309,10 @@ onMounted(() => {
   load()
   refreshState()
 })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  stopRescoreWatch()
+})
 </script>
 
 <style scoped>

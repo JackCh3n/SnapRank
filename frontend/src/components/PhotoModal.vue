@@ -114,7 +114,8 @@ const copyHint = ref('📋 复制分享卡片')
 const shareUrl = ref('')
 const noThumb = ref(false)
 
-const canRescore = computed(() => ['parse_fail', 'failed'].includes(p.value.status))
+// 不支持格式与解码失败无法通过重试解决，其余状态（含已评分）均可重评
+const canRescore = computed(() => !['unsupported', 'bad_image'].includes(p.value.status))
 const badgeText = computed(() => {
   const s = p.value.status
   if (s === 'parse_fail') return '待复检'

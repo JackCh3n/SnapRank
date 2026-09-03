@@ -429,25 +429,28 @@ func (e *Engine) resetIfChanged(id int64, curFP string) {
 
 // Rescore 复检重评：把指定照片重置为待处理并立即重跑（走当前所选模型），
 // 已有压缩缓存命中即跳过压缩，0 重复压缩；forceCost=true 时忽略跨会话评分缓存强制重调 API。
+// 支持跨批次：按照片所属批次分组逐批入队（图库勾选重评依赖此行为），批次间顺序执行。
 func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 	if len(ids) == 0 {
 		return "", errors.New("未选择要重评的照片")
-	}
-	sess, err := e.store.LastSession()
-	if err != nil {
-		return "", errors.New("暂无会话")
 	}
 	cfg := e.cfgFn()
 	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
 		return "", errors.New("尚未配置 API Key（或切换到 mock 模式体验）")
 	}
+	// 按照片所属批次分组；不支持的格式（RAF/HEIC 等）与解码失败无法通过重试解决，直接跳过
+	type group struct {
+		sessID string
+		dir    string
+		ids    []int64
+	}
+	groups := make(map[string]*group)
 	n := 0
 	for _, id := range ids {
 		p, err := e.store.GetPhoto(id)
-		if err != nil || p == nil || p.SessionID != sess.ID {
+		if err != nil || p == nil {
 			continue
 		}
-		// 不支持的格式（RAF/HEIC 等）与解码失败无法通过重试解决，直接跳过
 		if p.Status == store.StatusUnsupported || p.Status == store.StatusBadImage {
 			continue
 		}
@@ -456,16 +459,32 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 			// 重置后清除指纹缓存条目，强制重调 API（同模型+版本）
 			e.store.CacheDelete(p.Fingerprint, p.Model, p.PromptVersion)
 		}
+		g := groups[p.SessionID]
+		if g == nil {
+			sess, err := e.store.GetSession(p.SessionID)
+			if err != nil || sess == nil {
+				continue // 批次已被删除，照片无法重跑
+			}
+			g = &group{sessID: p.SessionID, dir: sess.SourceDir}
+			groups[p.SessionID] = g
+		}
+		g.ids = append(g.ids, id)
 		n++
 	}
 	if n == 0 {
-		return "", errors.New("所选照片不属于当前会话")
+		return "", errors.New("没有可重评的照片（不存在、批次已删除或格式不支持）")
 	}
-	// 复检重评使用当前配置的默认模型（而非批次旧模型）
+	// 复检重评统一使用当前配置的默认模型（而非批次旧模型）
 	model := cfg.Model.Default
-	e.enqueue(sess.ID, StartOpts{Dir: sess.SourceDir}, model)
-	logutil.Info("复检重评 %d 张入队（会话 %s，强制重调=%v）", n, sess.ID, forceCost)
-	return sess.ID, nil
+	first := ""
+	for _, g := range groups {
+		e.enqueue(g.sessID, StartOpts{Dir: g.dir}, model)
+		if first == "" {
+			first = g.sessID
+		}
+	}
+	logutil.Info("复检重评 %d 张入队（%d 个批次，强制重调=%v）", n, len(groups), forceCost)
+	return first, nil
 }
 
 // RescoreAllFailed 一键重试当前会话全部失败照片（解析失败 + 调用失败）
