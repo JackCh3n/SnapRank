@@ -298,25 +298,6 @@ func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 		ids = append(ids, m.ID)
 	}
 	logutil.Info("[models] 网关返回 %d 模型", len(ids))
-	// 火山 coding plan 网关的 /v1/models 返回全量 ark 目录（含大量不在
-	// coding plan 内的模型，调用会报 UnsupportedModel）；按实测清单过滤
-	if a.isVolcano() {
-		inPlan := map[string]bool{}
-		for _, m := range volcanoCodingPlanModels {
-			inPlan[m] = true
-		}
-		filtered := make([]string, 0, len(ids))
-		for _, id := range ids {
-			if inPlan[id] {
-				filtered = append(filtered, id)
-			}
-		}
-		if len(filtered) > 0 {
-			logutil.Info("[models] coding plan 过滤后 %d", len(filtered))
-			return filtered, nil
-		}
-		logutil.Info("[models] 过滤后为 0，退回全量 %d", len(ids))
-	}
 	return ids, nil
 }
 
