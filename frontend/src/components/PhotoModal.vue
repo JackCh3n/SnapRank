@@ -17,18 +17,19 @@
         <div class="pm-file">
           <div class="pm-name" :title="p.src_path">{{ p.filename }}</div>
           <div class="pm-meta">
-            <span class="tag">{{ p.model || '—' }}</span>
-            <span v-if="p.duration_ms" class="pm-meta-item">{{ p.duration_ms }}ms</span>
-            <span v-if="p.source === 'cache'" class="pm-meta-item">缓存复用</span>
-            <span v-if="p.clamped" class="pm-meta-item warn">分数裁剪</span>
+            <span class="tag">{{ disp.model || '—' }}</span>
+            <span v-if="disp.duration_ms" class="pm-meta-item">{{ disp.duration_ms }}ms</span>
+            <span v-if="disp.source === 'cache'" class="pm-meta-item">缓存复用</span>
+            <span v-if="p.clamped && !viewed" class="pm-meta-item warn">分数裁剪</span>
+            <span v-if="viewed" class="pm-meta-item hist-hint">查看历史 {{ viewed.created_at }}</span>
           </div>
         </div>
 
         <!-- 总分 + 四维得分条 -->
-        <div class="pm-score-wrap" v-if="p.dims">
+        <div class="pm-score-wrap" v-if="disp.dims">
           <div class="pm-score-main">
-            <div class="pm-score-num">{{ p.score.toFixed(1) }}</div>
-            <div class="pm-score-sub">总分<span>满分 10</span></div>
+            <div class="pm-score-num">{{ disp.score.toFixed(1) }}</div>
+            <div class="pm-score-sub">{{ viewed ? '历史总分' : '总分' }}<span>满分 10</span></div>
           </div>
           <div class="pm-dims">
             <div class="pm-dim" v-for="d in dimRows" :key="d.key">
@@ -40,26 +41,26 @@
           </div>
         </div>
         <div v-else class="pm-nodims">
-          <span class="error-text">评分解析失败，暂无维度分</span>
-          <span v-if="p.error" class="pm-err-detail">{{ p.error }}</span>
+          <span class="error-text">{{ viewed ? '该历史记录未包含维度分' : '评分解析失败，暂无维度分' }}</span>
+          <span v-if="!viewed && p.error" class="pm-err-detail">{{ p.error }}</span>
         </div>
 
         <!-- 反馈区 -->
         <div class="pm-reasons">
-          <div class="pm-reason" v-if="p.strength">
+          <div class="pm-reason" v-if="disp.strength">
             <span class="pm-ico good">✓</span>
-            <span>{{ p.strength }}</span>
+            <span>{{ disp.strength }}</span>
           </div>
-          <div class="pm-reason" v-if="p.weakness">
+          <div class="pm-reason" v-if="disp.weakness">
             <span class="pm-ico bad">!</span>
-            <span>{{ p.weakness }}</span>
+            <span>{{ disp.weakness }}</span>
           </div>
-          <div class="pm-tags" v-if="p.tags && p.tags.length">
-            <span v-for="t in p.tags" :key="t" class="tag">{{ t }}</span>
+          <div class="pm-tags" v-if="disp.tags && disp.tags.length">
+            <span v-for="t in disp.tags" :key="t" class="tag">{{ t }}</span>
           </div>
         </div>
 
-        <!-- 评分历史（多模型 / 多次重评） -->
+        <!-- 评分历史（多模型 / 多次重评）：点击切换查看该次详情 -->
         <div class="pm-history" v-if="history.length">
           <div class="pm-h-head">
             <b>评分历史</b>
@@ -67,11 +68,15 @@
             <span class="pm-h-models">
               <span v-for="m in historyModels" :key="m" class="tag">{{ m }}</span>
             </span>
+            <span class="pm-h-tip">点击查看该次详情</span>
+            <button v-if="viewed" class="btn plain small" @click="viewIdx = -1">返回最新</button>
           </div>
-          <div class="pm-h-row" v-for="(h, i) in history" :key="i">
+          <div class="pm-h-row" v-for="(h, i) in history" :key="i" :class="{ on: viewIdx === i, current: viewIdx < 0 && i === 0 }"
+            :title="viewIdx === i ? '再次点击返回最新评分' : '点击查看这次评分的详情'" @click="selectHistory(i)">
             <span class="pm-h-score">{{ h.score.toFixed(1) }}</span>
             <span class="tag">{{ h.model || '—' }}</span>
             <span class="pm-h-src" :class="{ cached: h.source === 'cache' }">{{ h.source === 'cache' ? '缓存' : 'API' }}</span>
+            <span v-if="viewIdx < 0 && i === 0" class="pm-h-latest">最新</span>
             <span class="pm-h-dims" v-if="h.dims">
               技 {{ h.dims.technique.toFixed(1) }} · 构 {{ h.dims.composition.toFixed(1) }} · 内 {{ h.dims.content.toFixed(1) }} · 色 {{ h.dims.color.toFixed(1) }}
             </span>
@@ -155,14 +160,14 @@ const hasPrev = computed(() => props.list.length > 1)
 const hasNext = computed(() => props.list.length > 1)
 
 const dimRows = computed(() => {
-  if (!p.value.dims) return []
+  if (!disp.value.dims) return []
   const w = (state.config && state.config.weights) || { technique: 0.4, composition: 0.3, content: 0.2, color: 0.1 }
   const sum = w.technique + w.composition + w.content + w.color || 1
   return [
-    { key: 'technique', name: '技术质量', value: p.value.dims.technique, weightPct: Math.round(w.technique / sum * 100), color: '#07c160' },
-    { key: 'composition', name: '构图', value: p.value.dims.composition, weightPct: Math.round(w.composition / sum * 100), color: '#10aeff' },
-    { key: 'content', name: '内容情感', value: p.value.dims.content, weightPct: Math.round(w.content / sum * 100), color: '#ffa300' },
-    { key: 'color', name: '色彩', value: p.value.dims.color, weightPct: Math.round(w.color / sum * 100), color: '#af52de' },
+    { key: 'technique', name: '技术质量', value: disp.value.dims.technique, weightPct: Math.round(w.technique / sum * 100), color: '#07c160' },
+    { key: 'composition', name: '构图', value: disp.value.dims.composition, weightPct: Math.round(w.composition / sum * 100), color: '#10aeff' },
+    { key: 'content', name: '内容情感', value: disp.value.dims.content, weightPct: Math.round(w.content / sum * 100), color: '#ffa300' },
+    { key: 'color', name: '色彩', value: disp.value.dims.color, weightPct: Math.round(w.color / sum * 100), color: '#af52de' },
   ]
 })
 
@@ -189,14 +194,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 // ---------- 评分历史 ----------
 const history = ref([])
+const viewIdx = ref(-1) // -1 = 当前（最新）；>=0 = 正在查看的第 i 条历史
 const historyModels = computed(() => [...new Set(history.value.map((h) => h.model).filter(Boolean))])
+const viewed = computed(() => (viewIdx.value >= 0 ? history.value[viewIdx.value] || null : null))
+// 弹窗主体展示的数据：查看历史时用该条记录，否则用照片当前数据
+const disp = computed(() => {
+  const h = viewed.value
+  if (!h) return p.value
+  return { ...p.value, score: h.score, dims: h.dims, tags: h.tags || [], strength: h.strength, weakness: h.weakness, model: h.model, source: h.source, duration_ms: 0 }
+})
+function selectHistory(i) {
+  viewIdx.value = viewIdx.value === i ? -1 : i
+}
 async function loadHistory() {
-  if (!p.value || !p.value.id) { history.value = []; return }
+  if (!p.value || !p.value.id) { history.value = []; viewIdx.value = -1; return }
   try {
     history.value = await api(`/api/photo/scores?id=${p.value.id}`)
   } catch {
     history.value = []
   }
+  if (viewIdx.value >= history.value.length) viewIdx.value = -1
 }
 
 // 重置分享状态（换照片时）
@@ -205,6 +222,7 @@ watch(() => p.value && p.value.id, () => {
   shareUrl.value = ''
   copyHint.value = '📋 复制分享卡片'
   noThumb.value = false
+  viewIdx.value = -1 // 换照片回到查看最新
   resetRescore()
   loadHistory()
 })
@@ -409,11 +427,11 @@ async function buildShareCard(photo) {
 }
 
 async function copyShareCard() {
-  if (!p.value) return
+  if (!disp.value) return
   sharing.value = true
   copyHint.value = '生成中…'
   try {
-    const canvas = await buildShareCard(p.value)
+    const canvas = await buildShareCard(disp.value)
     shareUrl.value = canvas.toDataURL('image/png')
     let copied = false
     if (navigator.clipboard && window.ClipboardItem) {
@@ -504,15 +522,25 @@ async function copyShareCard() {
 .pm-history { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .pm-h-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
 .pm-h-models { display: flex; gap: 4px; flex-wrap: wrap; }
+.pm-h-tip { color: var(--text-2); font-size: 11px; margin-left: auto; }
 .pm-h-row {
   display: flex; align-items: center; gap: 8px; font-size: 12px;
   background: var(--card-2); border-radius: 8px; padding: 6px 10px;
+  cursor: pointer; outline: 2px solid transparent; transition: outline-color 0.15s, background 0.15s;
 }
+.pm-h-row:hover { background: rgba(127, 127, 127, 0.14); }
+.pm-h-row.on { outline: 2px solid var(--accent); }
+.pm-h-row.current { box-shadow: inset 3px 0 0 var(--accent); }
 .pm-h-score { font-weight: 800; font-size: 15px; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 30px; }
 .pm-h-src { color: var(--text-2); flex: none; }
 .pm-h-src.cached { color: var(--warn); }
+.pm-h-latest {
+  flex: none; font-size: 10px; font-weight: 700; color: #fff;
+  background: var(--accent); border-radius: 4px; padding: 1px 5px;
+}
 .pm-h-dims { color: var(--text-2); margin-left: auto; font-variant-numeric: tabular-nums; }
 .pm-h-time { color: var(--text-2); font-size: 11px; flex: none; }
+.pm-meta-item.hist-hint { color: var(--accent); }
 
 .pm-rescore { border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
 .pm-rescore-head { display: flex; align-items: center; gap: 10px; }
