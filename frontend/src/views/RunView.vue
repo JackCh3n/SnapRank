@@ -28,6 +28,8 @@
       </div>
       <div v-if="dirHistory.length" class="dir-history">
         <span class="muted">最近：</span>
+        <span class="chip-x" title="清空全部目录历史" style="cursor:pointer;border:none;background:none"
+          @click.stop="clearDirHistory">🗑️</span>
         <span v-for="d in dirHistory" :key="d" class="dir-chip" @click="useDir(d)" :title="d">
           <span class="chip-text">{{ shortDir(d) }}</span>
           <span class="chip-x" @click.stop="removeDir(d)" title="删除该标签">×</span>
@@ -172,6 +174,18 @@ function useDir(d) {
   state.dir = d
   doScan()
 }
+async function clearDirHistory() {
+  if (!confirm('清空全部目录历史？')) return
+  try {
+    await api('/api/dir-history/remove', { method: 'POST', body: JSON.stringify({ dir: '__ALL__' }) })
+    const r = await api('/api/state')
+    state.config = r.config
+    toast('目录历史已清空')
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
 async function removeDir(d) {
   try {
     await api('/api/dir-history/remove', { method: 'POST', body: JSON.stringify({ dir: d }) })

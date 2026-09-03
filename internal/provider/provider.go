@@ -19,6 +19,7 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 
 	"snaprank/internal/config"
+	"snaprank/internal/logutil"
 )
 
 // ErrRateLimit 平台限流（429），由流水线动态降并发
@@ -117,6 +118,8 @@ func FilterVision(ids []string, patterns []string) []string {
 func (t *TokenRhythm) Score(ctx context.Context, model string, req ScoreRequest) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, req.Timeout)
 	defer cancel()
+	start := time.Now()
+	logutil.Info("[评分] %s 开始（超时 %ds）", model, int(req.Timeout.Seconds()))
 
 	textPart := openai.ChatMessagePart{Type: openai.ChatMessagePartTypeText, Text: req.Prompt}
 	imgPart := openai.ChatMessagePart{Type: openai.ChatMessagePartTypeImageURL,
@@ -149,6 +152,7 @@ func (t *TokenRhythm) Score(ctx context.Context, model string, req ScoreRequest)
 			return "", fmt.Errorf("模型无返回内容")
 		}
 		content := resp.Choices[0].Message.Content
+		logutil.Info("[评分] %s 完成，耗时 %dms", model, time.Since(start).Milliseconds())
 		// 思考型模型可能把 max_tokens 全部用于推理，正文被截断为空
 		if strings.TrimSpace(content) == "" && resp.Choices[0].FinishReason == openai.FinishReasonLength {
 			return "", fmt.Errorf("模型输出为空：max_tokens(%d) 被推理过程耗尽（finish_reason=length），请在设置中增大 max_tokens", req.MaxTokens)

@@ -28,20 +28,20 @@
         <label class="field grow">
           协议
           <select v-model="cfg.provider.protocol" style="width: 170px"
-            title="火山 coding plan 等网关两种都支持；Anthropic 官方选 anthropic">
+            title="火山 coding plan 等网关两种都支持；Anthropic 官方选 anthropic"
+            @change="onProtocolChange">
             <option value="chat">Chat Completions</option>
             <option value="anthropic">Anthropic Messages</option>
           </select>
         </label>
         <label class="field">
-          API Key（点击输入框右侧图标可显示/隐藏）
-          <div style="display: flex; gap: 6px">
-            <input v-model="cfg.provider.api_key" :type="showKey ? 'text' : 'password'"
-              :placeholder="cfg.provider.api_key ? `已设置（${cfg.provider.api_key}）` : 'sk-...'" style="flex: 1" />
-            <button class="btn plain small" :title="showKey ? '隐藏 Key' : '显示 Key'"
-              @click="showKey = !showKey">{{ showKey ? '🙈' : '👁' }}</button>
-          </div>
+          API Key（本地明文展示，可直接编辑）
+          <input v-model="cfg.provider.api_key" placeholder="sk-..." />
         </label>
+        <button class="btn plain small" title="填入火山 coding plan Anthropic 地址（/api/coding）"
+          @click="fillVolcano('anthropic')">火山 Anthropic</button>
+        <button class="btn plain small" title="填入火山 coding plan OpenAI 地址（/api/coding/v3）"
+          @click="fillVolcano('chat')">火山 OpenAI v3</button>
       </div>
       <div class="row" style="margin-top: 12px">
         <button class="btn plain" @click="testConn">{{ testing ? '测试中…' : '测试连接' }}</button>
@@ -177,7 +177,30 @@ const connState = ref(null)
 const clearing = ref(false)
 const clearMsg = ref('')
 const presetSaveName = ref('')
-const showKey = ref(false)
+
+// 火山 coding plan 两个协议入口地址
+const VOLCANO = {
+  anthropic: 'https://ark.cn-beijing.volces.com/api/coding',
+  chat: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+}
+
+// 切换协议时：若当前 base_url 是火山地址，自动换到对应协议入口
+function onProtocolChange() {
+  const c = cfg.value
+  if (!c || !c.provider.base_url) return
+  if (c.provider.base_url.startsWith('https://ark.cn-beijing.volces.com')) {
+    c.provider.base_url = VOLCANO[c.provider.protocol || 'chat']
+    toast('已自动切换到火山 ' + (c.provider.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI v3') + ' 地址')
+  }
+}
+
+function fillVolcano(proto) {
+  if (!cfg.value) return
+  cfg.value.provider.protocol = proto
+  cfg.value.provider.base_url = VOLCANO[proto]
+  cfg.value.provider.type = 'tokenrhythm'
+  toast('已填入火山 coding plan 地址，请确认 Key 后保存')
+}
 
 const presets = computed(() => (state.config && state.config.presets) || [])
 const activePresetName = computed(() => {
@@ -214,7 +237,7 @@ async function deletePreset() {
 
 async function saveAsPreset() {
   const c = cfg.value
-  const name = presetSaveName.value.trim()
+  const name = (presetSaveName.value.trim() || activePresetName.value)
   if (!name) { toast('请先填写预设名', true); return }
   try {
     await api('/api/preset/upsert', {
@@ -223,7 +246,8 @@ async function saveAsPreset() {
     })
     const st = await api('/api/state')
     state.config = st.config
-    toast(`预设「${name}」已保存`)
+    presetSaveName.value = name
+    toast(`预设「${name}」已保存（选中同名预设时等价于保存当前配置）`)
   } catch (e) {
     toast(e.message, true)
   }
@@ -288,6 +312,7 @@ async function save(silent) {
   saving.value = true
   try {
     cfg.value = await api('/api/config', { method: 'POST', body: JSON.stringify(body) })
+    state.config = cfg.value
     visionPatterns.value = cfg.value.model.vision_patterns.join('\n')
     pricesJson.value = JSON.stringify(cfg.value.cost.prices, null, 1)
     saved.value = true

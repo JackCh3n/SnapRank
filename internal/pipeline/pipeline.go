@@ -388,7 +388,7 @@ func (e *Engine) popAndRun() {
 	e.startAsync(t.sessID, t.opts, t.model)
 }
 
-// QueueStatus 当前运行与排队中的任务
+// QueueStatus 当前运行与排队中的任务（current 仅在有任务运行时返回）
 func (e *Engine) QueueStatus() map[string]interface{} {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -396,7 +396,11 @@ func (e *Engine) QueueStatus() map[string]interface{} {
 	for _, t := range e.queued {
 		ids = append(ids, t.sessID)
 	}
-	return map[string]interface{}{"current": e.sessionID, "queued": ids}
+	current := ""
+	if e.running.Load() {
+		current = e.sessionID
+	}
+	return map[string]interface{}{"current": current, "queued": ids}
 }
 
 func (e *Engine) publishQueue() {
@@ -833,16 +837,22 @@ func readB64(path string) (string, error) {
 
 // Stop 停止当前任务（已提交请求跑完，不再新增）
 func (e *Engine) Stop() bool {
-	if !e.IsRunning() {
-		return false
-	}
+	stopped := false
 	e.mu.Lock()
-	cancel := e.cancel
-	e.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if e.running.Load() {
+		if e.cancel != nil {
+			e.cancel()
+			stopped = true
+		}
 	}
-	return true
+	// 同时清空排队任务（用户预期：停止 = 全部停止）
+	e.queued = nil
+	e.mu.Unlock()
+	e.publishQueue()
+	if !stopped {
+		logutil.Info("停止请求：当前无运行中任务")
+	}
+	return stopped
 }
 
 // ---------- 归档（阶段二） ----------

@@ -78,22 +78,10 @@ func (c *Core) Engine() *pipeline.Engine {
 
 // ---------- 配置 ----------
 
-// GetConfig 返回配置（API Key 脱敏：仅返回是否已设置）
+// GetConfig 返回配置。本地单用户工具，Key 直接返回明文
+// （前端以 password 态遮盖，用户可点击显示）
 func (c *Core) GetConfig() *config.Config {
-	cfg := c.snapshotConfig()
-	if cfg.Provider.APIKey != "" {
-		masked := *cfg
-		masked.Provider.APIKey = maskKey(cfg.Provider.APIKey)
-		return &masked
-	}
-	return cfg
-}
-
-func maskKey(k string) string {
-	if len(k) <= 8 {
-		return "****"
-	}
-	return k[:4] + "****" + k[len(k)-4:]
+	return c.snapshotConfig()
 }
 
 // SaveConfigRequest 保存配置请求（api_key 为空表示保持不变；"-" 表示清除）
@@ -116,11 +104,7 @@ func (c *Core) SaveConfig(req SaveConfigRequest) (*config.Config, error) {
 		cfg.DirHistory = req.DirHistory
 	}
 	if req.Provider != nil {
-		old := cfg.Provider.APIKey
 		cfg.Provider = *req.Provider
-		if cfg.Provider.APIKey == "" || cfg.Provider.APIKey == maskKey(old) {
-			cfg.Provider.APIKey = old // 未改动
-		}
 	}
 	if req.Model != nil {
 		cfg.Model = *req.Model
@@ -377,19 +361,22 @@ func (c *Core) OpenFolder(path string) error {
 	}
 }
 
-// RemoveDirHistory 删除一条目录历史标签
+// RemoveDirHistory 删除目录历史标签；dir=__ALL__ 清空全部
 func (c *Core) RemoveDirHistory(dir string) error {
 	c.cfgMu.Lock()
-	var out []string
-	for _, d := range c.cfg.DirHistory {
-		if d != dir {
-			out = append(out, d)
+	defer c.cfgMu.Unlock()
+	if dir == "__ALL__" {
+		c.cfg.DirHistory = nil
+	} else {
+		var out []string
+		for _, d := range c.cfg.DirHistory {
+			if d != dir {
+				out = append(out, d)
+			}
 		}
+		c.cfg.DirHistory = out
 	}
-	c.cfg.DirHistory = out
-	err := c.cfg.Save()
-	c.cfgMu.Unlock()
-	return err
+	return c.cfg.Save()
 }
 
 // RenameSession 重命名批次
