@@ -312,11 +312,16 @@ function safeParse(s) {
 }
 
 onMounted(async () => {
-  const r = await api('/api/state')
-  cfg.value = r.config
-  state.config = r.config
-  visionPatterns.value = r.config.model.vision_patterns.join('\n')
-  pricesJson.value = JSON.stringify(r.config.cost.prices, null, 1)
+  try {
+    const r = await api('/api/state')
+    cfg.value = r.config
+    state.config = r.config
+    visionPatterns.value = r.config.model.vision_patterns.join('\n')
+    pricesJson.value = JSON.stringify(r.config.cost.prices, null, 1)
+  } catch (e) {
+    console.error('[Settings] 初始化失败:', e)
+    toast('设置加载失败：' + e.message, true)
+  }
 })
 </script>
 

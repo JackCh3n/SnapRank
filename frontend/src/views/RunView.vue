@@ -486,10 +486,14 @@ async function hydrateTasks() {
 }
 
 onMounted(async () => {
-  await refreshState()
-  await hydrateTasks()
-  if (!state.selModel) state.selModel = state.currentModel
-  if (!state.models.vision.length) loadModels()
+  try {
+    await refreshState()
+    await hydrateTasks()
+    if (!state.selModel) state.selModel = state.currentModel
+    if (!state.models.vision.length) loadModels().catch((e) => console.error('[RunView] 模型拉取失败:', e))
+  } catch (e) {
+    console.error('[RunView] 初始化失败:', e)
+  }
 })
 </script>
 

@@ -40,13 +40,26 @@ export function toast(msg, isErr = false) {
 }
 
 export async function api(path, opts = {}) {
+  if (localStorage.getItem('sr_debug') === '1') {
+    console.log(`[api] → ${opts.method || 'GET'} ${path}`, opts.body || '')
+  }
   const r = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   })
   let j = {}
   try { j = await r.json() } catch { /* 空响应 */ }
-  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+  if (!r.ok) {
+    let msg = j.error || `HTTP ${r.status}`
+    if (r.status === 401 || r.status === 403) {
+      msg += ' —— 认证失败：请检查 API Key 是否正确（设置 → 平台接入 → 测试连接）'
+    }
+    console.error(`[api] ✗ ${r.status} ${path}:`, msg)
+    throw new Error(msg)
+  }
+  if (localStorage.getItem('sr_debug') === '1') {
+    console.log(`[api] ✓ ${r.status} ${path}`)
+  }
   return j
 }
 
@@ -73,8 +86,14 @@ export async function refreshModels() {
     state.models = await api('/api/models')
     return state.models
   } catch (e) {
-    toast('拉取模型失败：' + e.message, true)
-    return { all: [], vision: [] }
+    console.error('[models] 拉取失败:', e)
+    // 保留已有模型列表（避免切页后下拉清空/页面异常）
+    if (!state.models.vision.length) {
+      toast('拉取模型失败：' + e.message, true)
+    } else {
+      toast('拉取模型失败，沿用已有列表（' + e.message + '）', true)
+    }
+    return state.models
   }
 }
 

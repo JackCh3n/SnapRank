@@ -95,7 +95,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { state, taskOf, api, toast } from '../store.js'
+import { state, taskOf, api, toast, refreshState } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 
 const items = ref([])
