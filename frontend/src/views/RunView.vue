@@ -81,6 +81,13 @@
           {{ starting ? '创建中…' : '▶ 开始评分' }}</button>
         <button class="btn danger" :disabled="!state.queue.current" @click="doStop">■ 停止当前任务</button>
       </div>
+      <div class="row" style="margin-top: 10px; align-items: center">
+        <label class="field row" style="flex-direction: row; align-items: center; gap: 6px">
+          <input v-model="nightMode" type="checkbox" />
+          <span>🌙 夜间评分模式</span>
+        </label>
+        <span class="muted">挂机跑完整目录：失败照片不阻塞，每轮结束后自动重新排队重试（间隔 15s），直到全部评分成功</span>
+      </div>
       <div class="muted" style="margin-top: 8px">
         当前模型：<b>{{ state.currentModel || '未设置' }}</b>
         <span v-if="state.selModel && state.selModel !== state.currentModel" class="tag">已选择 {{ state.selModel }}，下次开始时生效</span>
@@ -288,6 +295,9 @@ function statusLabel(s) {
 
 const scanning = ref(false)
 const starting = ref(false)
+// 夜间评分模式：失败自动重试直到全部成功（选择记忆到 localStorage）
+const nightMode = ref(localStorage.getItem('sr_night_mode') === '1')
+watch(nightMode, (v) => localStorage.setItem('sr_night_mode', v ? '1' : '0'))
 const importing = ref(false)
 const importDone = ref(0)
 const importTotal = ref(0)
@@ -459,17 +469,18 @@ async function doStart(sample) {
   try {
     const r = await api('/api/start', {
       method: 'POST',
-      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value }),
+      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
     })
     selectedTask.value = r.session_id
     taskOf(r.session_id)
     state.currentModel = r.model || state.currentModel
     const queued = state.queue.queued.includes(r.session_id)
+    const nightTag = nightMode.value && !sample ? '🌙 夜间模式：' : ''
     if (r.resumed) {
-      toast(`已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
+      toast(`${nightTag}已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
     }
-    else if (queued) toast(`任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
-    else toast(`任务已开始：${r.session_id}（模型 ${r.model}）`)
+    else if (queued) toast(`${nightTag}任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
+    else toast(`${nightTag}任务已开始：${r.session_id}（模型 ${r.model}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)

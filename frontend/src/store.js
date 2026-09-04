@@ -136,12 +136,21 @@ export function connectSSE() {
     t.progress.push({ ...d, _ts: Date.now() })
     if (t.progress.length > 400) t.progress.splice(0, t.progress.length - 400)
   })
+  es.addEventListener('night', (e) => {
+    const d = JSON.parse(e.data)
+    toast(`🌙 夜间重试第 ${d.round} 轮：剩余 ${d.remaining} 张，${d.delay_sec}s 后开始`)
+  })
   es.addEventListener('done', (e) => {
     const d = JSON.parse(e.data)
     const t = taskOf(d.session_id)
     if (t) t.finished = true
     refreshState()
     if (d.stopped) toast(`任务 ${d.session_id} 已停止`)
+    else if (d.night) {
+      toast(d.failed > 0
+        ? `🌙 夜间模式结束：仍有 ${d.failed} 张持续失败（已停止重试）`
+        : '🌙 夜间模式结束：全部评分成功')
+    }
   })
   es.addEventListener('error', (e) => {
     if (e.data) {

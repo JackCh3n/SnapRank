@@ -63,6 +63,15 @@ type DonePayload struct {
 	SessionID string `json:"session_id"`
 	Stopped   bool   `json:"stopped"`
 	Failed    int    `json:"failed"`
+	Night     bool   `json:"night,omitempty"` // 夜间评分模式（失败数含解析失败）
+}
+
+// NightPayload 夜间模式重试轮次通知
+type NightPayload struct {
+	SessionID string `json:"session_id"`
+	Round     int    `json:"round"`
+	Remaining int    `json:"remaining"`
+	DelaySec  int    `json:"delay_sec"`
 }
 
 // Bus 事件总线（慢消费者丢帧，不阻塞流水线）
@@ -109,6 +118,7 @@ type StartOpts struct {
 	SampleN  int      `json:"sample_n"`  // 抽样试跑数量，0=全量
 	ForceNew bool     `json:"force_new"` // 强制新建会话（不续跑）
 	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
+	Night    bool     `json:"night"`     // 夜间评分模式：失败照片轮末重新入队，循环重试直到全部成功
 }
 
 // queuedTask 排队中的任务
@@ -522,6 +532,74 @@ func (e *Engine) CurrentSessionModel(sessID string) string {
 	return s.Model
 }
 
+// 夜间评分模式参数
+const (
+	nightRetryDelay     = 15 * time.Second // 轮间等待：给限流/瞬态故障留恢复时间
+	nightMaxStallRounds = 3                // 安全阀：连续 N 轮失败数无减少则停止，防止永久性失败无限重调烧钱
+)
+
+// nightLoop 夜间评分模式：一轮结束后收集失败照片（解析失败/调用失败）重新入队再跑，
+// 循环直到全部成功、被手动停止，或连续多轮无进展（安全阀触发）。压缩有全局缓存，重试轮零重复压缩。
+func (e *Engine) nightLoop(ctx context.Context, sessID string, opts StartOpts, model string) bool {
+	stall, prev := 0, -1
+	for round := 1; ; round++ {
+		if ctx.Err() != nil {
+			return true
+		}
+		ids, err := e.nightFailedIDs(sessID)
+		if err != nil {
+			logutil.Error("夜间模式读取失败照片: %v", err)
+			return false
+		}
+		if len(ids) == 0 {
+			logutil.Info("夜间模式：全部评分成功，结束重试")
+			return false
+		}
+		if prev == len(ids) {
+			stall++
+		} else {
+			stall = 0
+		}
+		prev = len(ids)
+		if stall >= nightMaxStallRounds {
+			logutil.Info("夜间模式：连续 %d 轮失败数无减少（剩 %d 张），停止重试", stall, len(ids))
+			e.Bus.Publish(Event{Type: "error", Data: map[string]string{
+				"session_id": sessID,
+				"error":      fmt.Sprintf("🌙 夜间模式停止：连续 %d 轮无进展，剩余 %d 张持续失败（多为内容或格式问题，建议白天手动复检）", stall, len(ids)),
+			}})
+			return false
+		}
+		e.Bus.Publish(Event{Type: "night", Data: NightPayload{SessionID: sessID, Round: round, Remaining: len(ids), DelaySec: int(nightRetryDelay / time.Second)}})
+		logutil.Info("夜间模式第 %d 轮：%d 张失败照片 %v 后重新入队", round, len(ids), nightRetryDelay)
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(nightRetryDelay):
+		}
+		for _, id := range ids {
+			e.store.ResetPhoto(id)
+		}
+		if stopped := e.run(ctx, sessID, opts, model); stopped {
+			return true
+		}
+	}
+}
+
+// nightFailedIDs 收集会话内可重试的失败照片（解析失败+调用失败；格式不支持/解码失败不可重试，不进重试循环）
+func (e *Engine) nightFailedIDs(sessID string) ([]int64, error) {
+	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20, "", "", "", "", -1, -1)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, 8)
+	for _, p := range photos {
+		if p.Status == store.StatusParseFail || p.Status == store.StatusFailed {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids, nil
+}
+
 func relPath(dir, path string) string {
 	r, err := filepath.Rel(dir, path)
 	if err != nil {
@@ -558,6 +636,10 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 	go func() {
 		defer e.running.Store(false)
 		stopped := e.run(ctx, sessID, opts, model)
+		if opts.Night && !stopped {
+			// 夜间评分模式：首轮结束后循环重试失败照片，直到全部成功/被停止/连续无进展
+			stopped = e.nightLoop(ctx, sessID, opts, model)
+		}
 		status := store.SessionCompleted
 		if stopped {
 			status = store.SessionStopped
@@ -571,7 +653,11 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 			scored := counts[store.StatusScored] + counts[store.StatusParseFail]
 			e.store.SpendAdd(time.Now().Format("2006-01-02"), model, scored, c*float64(scored))
 		}
-		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: counts[store.StatusFailed]}})
+		failed := counts[store.StatusFailed]
+		if opts.Night {
+			failed += counts[store.StatusParseFail] // 夜间模式目标两类清零
+		}
+		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: failed, Night: opts.Night}})
 		// 当前任务结束：拉起下一个排队任务
 		e.publishQueue()
 		e.popAndRun()
