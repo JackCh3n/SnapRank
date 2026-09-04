@@ -23,7 +23,14 @@
         </div>
         <div class="row">
           <button class="btn plain small" @click="selectAll">{{ selected.size ? '取消全选' : '全选当前筛选' }}</button>
-          <button class="btn plain small" :disabled="!lowCount" @click="selectLow">选择低分 &lt; {{ lowThreshold }} 分（{{ lowCount }}）</button>
+          <span class="field row" style="flex-direction: row; align-items: center; gap: 4px">
+            <button class="btn plain small" style="padding: 4px 10px" title="阈值减 0.5" @click="bumpThreshold(-0.5)">−</button>
+            <input v-model.number="lowThreshold" type="number" min="0" max="10" step="0.5" style="width: 60px; text-align: center"
+              @change="clampThreshold" />
+            <button class="btn plain small" style="padding: 4px 10px" title="阈值加 0.5" @click="bumpThreshold(0.5)">＋</button>
+            <button class="btn plain small" :disabled="!lowCount" title="勾选所有低于阈值的照片，页面只展示这些"
+              @click="selectLow">选择 &lt; {{ lowThreshold }} 分（{{ lowCount }}）</button>
+          </span>
           <button class="btn small" :disabled="!rescorableCount || rescoring" title="忽略缓存，用当前所选模型重新调用 AI 评分"
             @click="rescoreSelected">↻ 重评所选（{{ rescorableCount }}）</button>
           <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
@@ -121,6 +128,14 @@ const deleting = ref(false)
 const deleteRaw = ref(true)
 const delResult = ref(null)
 const lowThreshold = ref(5)
+// 阈值步进（±0.5）并夹在 0~10
+function bumpThreshold(d) {
+  lowThreshold.value = Math.min(10, Math.max(0, +((lowThreshold.value + d).toFixed(1))))
+}
+function clampThreshold() {
+  if (!Number.isFinite(lowThreshold.value)) lowThreshold.value = 5
+  lowThreshold.value = Math.min(10, Math.max(0, +lowThreshold.value.toFixed(1)))
+}
 
 function bandOf(p) {
   if (p.status !== 'scored') return null
@@ -196,7 +211,7 @@ function selectLow() {
   search.value = ''
   onlySelected.value = true // 页面只展示这批勾选的照片
   applyFilters()
-  toast(`已选中 ${selected.value.size} 张低分照片，页面已只展示这些（取消勾选即从视图移除）`)
+  toast(`已选中 ${selected.value.size} 张低于 ${lowThreshold.value} 分的照片，页面已只展示这些（取消勾选即从视图移除）`)
 }
 function onNavigate(newPhoto) {
   preview.value = newPhoto
