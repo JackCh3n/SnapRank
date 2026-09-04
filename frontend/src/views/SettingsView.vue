@@ -99,7 +99,7 @@
     <div class="card">
       <h3 class="title">流水线与压缩</h3>
       <div class="row">
-        <label class="field">评分并发 <input type="number" min="1" max="16" v-model="cfg.pipeline.score_concurrency" style="width: 80px" /></label>
+        <label class="field">评分并发 <input type="number" min="1" max="30" v-model="cfg.pipeline.score_concurrency" style="width: 80px" title="同时调用 AI 评分的张数（1=串行，默认 1；过高易触发限流）" /></label>
         <label class="field">压缩最长边 <input type="number" step="128" v-model="cfg.pipeline.max_edge" style="width: 90px" /></label>
         <label class="field">MozJPEG 质量 <input type="number" min="40" max="100" v-model="cfg.pipeline.jpeg_quality" style="width: 80px" /></label>
         <label class="field">跳过小于（KB）<input type="number" v-model="cfg.pipeline.min_file_size_kb" style="width: 90px" /></label>

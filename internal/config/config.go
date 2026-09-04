@@ -206,7 +206,7 @@ func Default() *Config {
 			ReuseScores: true,
 		},
 		Pipeline: PipelineConfig{
-			ScoreConcurrency:    4,
+			ScoreConcurrency:    1,
 			CompressConcurrency: 2,
 			MaxEdge:             2048,
 			JPEGQuality:         82,
@@ -322,7 +322,8 @@ func (c *Config) normalize() {
 			c.Score.Thresholds[i] = c.Score.Thresholds[i-1]
 		}
 	}
-	if c.Pipeline.ScoreConcurrency <= 0 || c.Pipeline.ScoreConcurrency > 16 {
+	// 评分并发：默认 1（单线程串行），上限 30（过高易触发平台限流，超限回落默认）
+	if c.Pipeline.ScoreConcurrency <= 0 || c.Pipeline.ScoreConcurrency > 30 {
 		c.Pipeline.ScoreConcurrency = d.Pipeline.ScoreConcurrency
 	}
 	if c.Pipeline.CompressConcurrency <= 0 || c.Pipeline.CompressConcurrency > 16 {
