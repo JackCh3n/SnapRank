@@ -138,6 +138,7 @@ type Engine struct {
 	cancel    context.CancelFunc
 	sessionID string
 	concScale atomic.Int64 // 429 降速倍率（1=正常，越大退避越久）
+	paused    atomic.Bool  // 暂停标记：跑完当前这张后挂起，恢复后继续（内存态，随任务结束清除）
 	mu        sync.Mutex
 	queued    []queuedTask // 排队任务（当前任务结束后顺序执行）
 }
@@ -410,11 +411,66 @@ func (e *Engine) QueueStatus() map[string]interface{} {
 	if e.running.Load() {
 		current = e.sessionID
 	}
-	return map[string]interface{}{"current": current, "queued": ids}
+	return map[string]interface{}{"current": current, "queued": ids, "paused": e.paused.Load()}
 }
 
 func (e *Engine) publishQueue() {
 	e.Bus.Publish(Event{Type: "queue", Data: e.QueueStatus()})
+}
+
+// PauseTask 暂停当前运行中的任务：跑完正在评分的这张后挂起，恢复后继续
+func (e *Engine) PauseTask() bool {
+	if !e.running.Load() || e.paused.Load() {
+		return false
+	}
+	e.paused.Store(true)
+	logutil.Info("任务已暂停: %s", e.sessionID)
+	e.publishQueue()
+	return true
+}
+
+// ResumeTask 恢复暂停中的任务
+func (e *Engine) ResumeTask() bool {
+	if !e.paused.Load() {
+		return false
+	}
+	e.paused.Store(false)
+	logutil.Info("任务已恢复: %s", e.sessionID)
+	e.publishQueue()
+	return true
+}
+
+// RemoveQueued 从队列中移除一个排队中的任务（不影响运行中任务）
+func (e *Engine) RemoveQueued(sessID string) bool {
+	e.mu.Lock()
+	found := false
+	out := e.queued[:0]
+	for _, t := range e.queued {
+		if t.sessID == sessID {
+			found = true
+			continue
+		}
+		out = append(out, t)
+	}
+	e.queued = out
+	e.mu.Unlock()
+	if found {
+		logutil.Info("已从队列移除任务: %s", sessID)
+		e.publishQueue()
+	}
+	return found
+}
+
+// waitIfPaused 暂停期间阻塞（producer 取任务前调用）；返回 false 表示已被停止
+func (e *Engine) waitIfPaused(ctx context.Context) bool {
+	for e.paused.Load() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return ctx.Err() == nil
 }
 
 // ClearQueue 清空排队任务（清空数据时用）
@@ -660,6 +716,7 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: failed, Night: opts.Night}})
 		// 先复位运行态再拉起排队任务：popAndRun 依赖 running=false 才会取任务，
 		// 不能依赖 defer 的复位时机（那要等本 goroutine 返回，队列会永远卡住）
+		e.paused.Store(false) // 暂停标记不跨任务
 		e.running.Store(false)
 		e.publishQueue()
 		e.popAndRun()
@@ -780,8 +837,13 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	}
 producer:
 	for _, p := range scoreQueue {
+		if !e.waitIfPaused(ctx) {
+			stopFlag.Store(true)
+			break producer
+		}
 		select {
 		case <-ctx.Done():
+			stopFlag.Store(true)
 			break producer
 		case jobs <- p:
 		}
@@ -822,8 +884,13 @@ func (e *Engine) compressAll(ctx context.Context, eng *compress.Engine, queue []
 	}
 producer:
 	for _, p := range queue {
+		if !e.waitIfPaused(ctx) {
+			stopFlag.Store(true)
+			break producer
+		}
 		select {
 		case <-ctx.Done():
+			stopFlag.Store(true)
 			break producer
 		case jobs <- p:
 		}

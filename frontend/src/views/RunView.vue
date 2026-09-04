@@ -106,11 +106,21 @@
 
       <template v-if="task">
         <template v-if="isQueued">
-          <div class="muted">⏳ 排队中，等待前面的任务完成后自动开始…</div>
+          <div class="row" style="justify-content: space-between; align-items: center">
+            <div class="muted">⏳ 排队中，等待前面的任务完成后自动开始…</div>
+            <button class="btn plain small danger-text" @click="removeQueued">🗑 从队列移除</button>
+          </div>
         </template>
         <template v-else>
-          <h3 class="title sub">{{ stageLabel }} {{ doneCount }}/{{ totalStr }}
+          <h3 class="title sub">
+            {{ stageLabel }} {{ doneCount }}/{{ totalStr }}
             <span class="eta" v-if="etaText">{{ etaText }}</span>
+            <span class="row" style="margin-left: auto; gap: 8px; align-items: center">
+              <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
+              <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
+              <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
+              <button class="btn danger small" @click="doStop">■ 停止</button>
+            </span>
           </h3>
           <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
           <div class="muted" style="margin: 6px 0 10px">
@@ -221,10 +231,44 @@ const queueCount = computed(() => state.queue.queued.length)
 function taskLabel(sid) {
   const t = state.tasks[sid] || {}
   let st = ''
-  if (sid === state.queue.current) st = '▶ 运行中'
+  if (sid === state.queue.current) st = state.queue.paused ? '⏸ 已暂停' : '▶ 运行中'
   else if (state.queue.queued.includes(sid)) st = '⏳ 排队中'
   else if (t.finished) st = '✓ 已完成'
   return (st ? st + ' ' : '') + sid
+}
+
+// ---------- 任务管理：暂停 / 继续 / 移除排队任务 ----------
+async function pauseTask() {
+  try {
+    const r = await api('/api/task/pause', { method: 'POST', body: '{}' })
+    toast(r.paused ? '已暂停：正在评分的这张完成后挂起' : '暂停失败（任务可能刚结束）', !r.paused)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+async function resumeTask() {
+  try {
+    const r = await api('/api/task/resume', { method: 'POST', body: '{}' })
+    toast(r.resumed ? '任务已继续' : '恢复失败（任务未在暂停中）', !r.resumed)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+async function removeQueued() {
+  const sid = selectedTask.value
+  if (!sid) return
+  try {
+    const r = await api('/api/task/remove', { method: 'POST', body: JSON.stringify({ session: sid }) })
+    if (r.removed) {
+      toast(`已从队列移除任务 ${sid}`)
+      delete state.tasks[sid]
+      selectedTask.value = state.queue.current || state.queue.queued[0] || ''
+    } else {
+      toast('移除失败（任务可能已开始运行）', true)
+    }
+  } catch (e) {
+    toast(e.message, true)
+  }
 }
 
 const task = computed(() => taskOf(selectedTask.value))

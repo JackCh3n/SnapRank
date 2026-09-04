@@ -68,6 +68,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/photo/bucket", s.handleBucket)
 	s.mux.HandleFunc("POST /api/recalculate", s.handleRecalc)
 	s.mux.HandleFunc("POST /api/rescore", s.handleRescore)
+	s.mux.HandleFunc("POST /api/task/pause", s.handleTaskPause)
+	s.mux.HandleFunc("POST /api/task/resume", s.handleTaskResume)
+	s.mux.HandleFunc("POST /api/task/remove", s.handleTaskRemove)
 	s.mux.HandleFunc("POST /api/clean-cache", s.handleCleanCache)
 	s.mux.HandleFunc("POST /api/dir-history/remove", s.handleRemoveDirHistory)
 	s.mux.HandleFunc("POST /api/pick-dir", s.handlePickDir)
@@ -192,6 +195,32 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"stopped": s.core.Stop()})
+}
+
+// handleTaskPause 暂停当前运行中的任务（跑完当前一张后挂起）
+func (s *Server) handleTaskPause(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]bool{"paused": s.core.Engine().PauseTask()})
+}
+
+// handleTaskResume 恢复暂停中的任务
+func (s *Server) handleTaskResume(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]bool{"resumed": s.core.Engine().ResumeTask()})
+}
+
+// handleTaskRemove 从队列移除一个排队中的任务
+func (s *Server) handleTaskRemove(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Session string `json:"session"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if req.Session == "" {
+		writeErr(w, 400, errors.New("缺少 session"))
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"removed": s.core.Engine().RemoveQueued(req.Session)})
 }
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
