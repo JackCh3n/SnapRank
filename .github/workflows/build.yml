@@ -47,6 +47,11 @@ jobs:
             echo "upstream clone unavailable, unpacking committed snapshot"
             mkdir -p ddGoose-go
             unzip -q snaprank/third_party/ddgoose-go.zip -d ddGoose-go
+            # 快照 zip 内含顶层 ddgoose-go/ 目录，上移一层统一为 ddGoose-go/<files>
+            if [ -d ddGoose-go/ddgoose-go ]; then
+              cp -a ddGoose-go/ddgoose-go/. ddGoose-go/
+              rm -rf ddGoose-go/ddgoose-go
+            fi
           fi
           ls ddGoose-go/lib/cjpeg-mod.exe
 

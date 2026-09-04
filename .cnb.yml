@@ -60,6 +60,11 @@ main:
             export GOPROXY=https://goproxy.cn,direct
             git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
               || { echo "upstream clone unavailable, unpacking committed snapshot"; mkdir -p ../ddGoose-go && unzip -q third_party/ddgoose-go.zip -d ../ddGoose-go; }
+            # 快照 zip 内含顶层 ddgoose-go/ 目录，上移一层统一为 ../ddGoose-go/<files>
+            if [ -d ../ddGoose-go/ddgoose-go ]; then
+              cp -a ../ddGoose-go/ddgoose-go/. ../ddGoose-go/
+              rm -rf ../ddGoose-go/ddgoose-go
+            fi
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         # 构建前端（Vite 产物输出到 web/dist 并由 go:embed 内嵌）
@@ -165,6 +170,11 @@ main:
             export GOPROXY=https://goproxy.cn,direct
             git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
               || { echo "upstream clone unavailable, unpacking committed snapshot"; mkdir -p ../ddGoose-go && unzip -q third_party/ddgoose-go.zip -d ../ddGoose-go; }
+            # 快照 zip 内含顶层 ddgoose-go/ 目录，上移一层统一为 ../ddGoose-go/<files>
+            if [ -d ../ddGoose-go/ddgoose-go ]; then
+              cp -a ../ddGoose-go/ddgoose-go/. ../ddGoose-go/
+              rm -rf ../ddGoose-go/ddgoose-go
+            fi
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         - name: build-frontend
@@ -247,6 +257,11 @@ main:
             export GOPROXY=https://goproxy.cn,direct
             git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
               || { echo "upstream clone unavailable, unpacking committed snapshot"; mkdir -p ../ddGoose-go && unzip -q third_party/ddgoose-go.zip -d ../ddGoose-go; }
+            # 快照 zip 内含顶层 ddgoose-go/ 目录，上移一层统一为 ../ddGoose-go/<files>
+            if [ -d ../ddGoose-go/ddgoose-go ]; then
+              cp -a ../ddGoose-go/ddgoose-go/. ../ddGoose-go/
+              rm -rf ../ddGoose-go/ddgoose-go
+            fi
             ls ../ddGoose-go/lib/cjpeg-mod.exe
 
         - name: build-frontend
@@ -322,6 +337,11 @@ main:
             export GOPROXY=https://goproxy.cn,direct
             git -c credential.helper= clone --depth 1 https://cnb.cool/jackch3n/ddGoose-go ../ddGoose-go \
               || { echo "upstream clone unavailable, unpacking committed snapshot"; mkdir -p ../ddGoose-go && unzip -q third_party/ddgoose-go.zip -d ../ddGoose-go; }
+            # 快照 zip 内含顶层 ddgoose-go/ 目录，上移一层统一为 ../ddGoose-go/<files>
+            if [ -d ../ddGoose-go/ddgoose-go ]; then
+              cp -a ../ddGoose-go/ddgoose-go/. ../ddGoose-go/
+              rm -rf ../ddGoose-go/ddgoose-go
+            fi
         - name: vet-and-compile
           script: |
             set -e
