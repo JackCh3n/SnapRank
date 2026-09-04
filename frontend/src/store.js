@@ -18,10 +18,17 @@ export const state = reactive({
   selModel: '',                // 运行页选中的模型（跨页面保留）
   formatPreset: '',            // 运行页格式筛选（跨页面保留）
   importDir: '',               // 当前导入任务目录（贴入/拖入统一归类，后续追加）
+  forcedFiles: new Set(),      // 强制评分标记：`session|文件名`（重评/复检入队的图片，忽略缓存重调）
+  retryFiles: new Set(),       // 自动重试标记：`session|文件名`（失败后重新排队的图片）
   toast: null,
 })
 
 const FINAL = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
+
+// 标记一批图片为强制评分（重评提交方调用；评分成功后自动摘除标记）
+export function markForced(sessionId, filenames) {
+  for (const f of filenames || []) state.forcedFiles.add(sessionId + '|' + f)
+}
 
 // 获取（或初始化）某任务的进度容器
 export function taskOf(sid) {
@@ -135,10 +142,23 @@ export function connectSSE() {
     if (!t.startedAt) t.startedAt = Date.now()
     t.progress.push({ ...d, _ts: Date.now() })
     if (t.progress.length > 400) t.progress.splice(0, t.progress.length - 400)
+    // 评分成功：摘除强制/重试标记
+    if (d.status === 'scored') {
+      const key = d.session_id + '|' + d.file
+      state.forcedFiles.delete(key)
+      state.retryFiles.delete(key)
+    }
   })
   es.addEventListener('night', (e) => {
     const d = JSON.parse(e.data)
-    toast(`🌙 夜间重试第 ${d.round} 轮：剩余 ${d.remaining} 张，${d.delay_sec}s 后开始`)
+    const t = taskOf(d.session_id)
+    // 把上一轮失败的图片标记为重试（本轮将排队尾重新评分）
+    if (t) {
+      for (const p of t.progress) {
+        if (p.status === 'failed' || p.status === 'parse_fail') state.retryFiles.add(d.session_id + '|' + p.file)
+      }
+    }
+    toast(`🔁 自动重试第 ${d.round} 轮：剩余 ${d.remaining} 张，${d.delay_sec}s 后开始`)
   })
   es.addEventListener('done', (e) => {
     const d = JSON.parse(e.data)
@@ -148,8 +168,8 @@ export function connectSSE() {
     if (d.stopped) toast(`任务 ${d.session_id} 已停止`)
     else if (d.night) {
       toast(d.failed > 0
-        ? `🌙 夜间模式结束：仍有 ${d.failed} 张持续失败（已停止重试）`
-        : '🌙 夜间模式结束：全部评分成功')
+        ? `🔁 自动重试结束：仍有 ${d.failed} 张持续失败（已停止重试）`
+        : '🔁 自动重试结束：全部评分成功')
     }
   })
   es.addEventListener('error', (e) => {

@@ -145,7 +145,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { state, toast, api } from '../store.js'
+import { state, toast, api, markForced } from '../store.js'
 
 const props = defineProps({
   photo: { type: Object, required: true },
@@ -310,10 +310,11 @@ async function startRescore() {
   rescorePhase.value = '提交复检请求…'
   rescorePct.value = 8
   try {
-    await api('/api/rescore', {
+    const rr = await api('/api/rescore', {
       method: 'POST',
       body: JSON.stringify({ ids: [p.value.id], force: true }),
     })
+    markForced(rr.session_id, [p.value.filename])
   } catch (e) {
     rescoring.value = false
     rescoreResult.value = { ok: false, error: e.message }

@@ -84,9 +84,9 @@
       <div class="row" style="margin-top: 10px; align-items: center">
         <label class="field row" style="flex-direction: row; align-items: center; gap: 6px">
           <input v-model="nightMode" type="checkbox" />
-          <span>🌙 夜间评分模式</span>
+          <span>🔁 失败自动重试</span>
         </label>
-        <span class="muted">挂机跑完整目录：失败照片不阻塞，每轮结束后自动重新排队重试（间隔 15s），直到全部评分成功</span>
+        <span class="muted">失败的图片自动排到队尾重试（间隔 15s），直到全部评分成功——可夜间挂机跑完整目录</span>
       </div>
       <div class="muted" style="margin-top: 8px">
         当前模型：<b>{{ state.currentModel || '未设置' }}</b>
@@ -122,6 +122,9 @@
               <button class="btn danger small" @click="doStop">■ 停止</button>
             </span>
           </h3>
+          <div class="muted feed-stats" v-if="feedStats" style="margin: 2px 0 6px">
+            ✅ 成功 {{ feedStats.ok }} · <span :class="{ 'error-text': feedStats.fail > 0 }">❌ 失败{{ task.autoRetry ? '待重试' : '' }} {{ feedStats.fail }}</span> · ⏳ 待评分 {{ feedStats.comp }} · 📷 剩余 {{ remainCount }}
+          </div>
           <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
           <div class="muted" style="margin: 6px 0 10px">
             <span v-if="elapsedText">已用时 {{ elapsedText }}</span>
@@ -131,9 +134,12 @@
               <span class="mono">{{ iconOf(p.status) }}</span>
               <span class="fname" :title="p.file">{{ p.file }}</span>
               <span v-if="p.status === 'scored'" class="score">{{ p.score.toFixed(1) }} 分</span>
-              <span v-else-if="p.status === 'parse_fail'" class="error-text">解析失败（待复检）</span>
+              <span v-else-if="p.status === 'parse_fail'" class="error-text">解析失败{{ task.autoRetry ? '（将重新排队）' : '（待复检）' }}</span>
+              <span v-else-if="p.status === 'failed'" class="error-text">调用失败{{ task.autoRetry ? '（将重新排队）' : '' }}</span>
               <span v-else-if="p.status !== 'compressed'" class="error-text" :title="p.error">{{ statusLabel(p.status) }}</span>
               <span v-if="p.cached" class="tag">缓存</span>
+              <span v-if="state.forcedFiles.has(selectedTask + '|' + p.file)" class="tag force-tag">强制</span>
+              <span v-if="state.retryFiles.has(selectedTask + '|' + p.file)" class="tag retry-tag">重试</span>
             </div>
           </div>
         </template>
@@ -283,6 +289,26 @@ const compressDone = computed(() => (task.value ? task.value.progress.filter((x)
 const scoreDone = computed(() => (task.value ? task.value.progress.filter((x) => FINAL.has(x.status)).length : 0))
 const doneCount = computed(() => (stage.value === 'compress' ? compressDone.value : scoreDone.value))
 const totalStr = computed(() => total.value || '?')
+
+// 图片级队列摘要：按文件名取最后一次状态统计
+const feedStats = computed(() => {
+  const t = task.value
+  if (!t || !t.progress.length) return null
+  const last = {}
+  for (const p of t.progress) last[p.file] = p.status
+  let ok = 0, fail = 0, comp = 0
+  for (const s of Object.values(last)) {
+    if (s === 'scored') ok++
+    else if (s === 'failed' || s === 'parse_fail') fail++
+    else if (s === 'compressed') comp++
+  }
+  return { ok, fail, comp }
+})
+const remainCount = computed(() => {
+  const t = total.value
+  if (!t) return '?'
+  return Math.max(0, t - (doneCount.value || 0))
+})
 const pct = computed(() => (total.value ? Math.min(100, (doneCount.value / total.value) * 100) : 0))
 
 const stageLabel = computed(() =>
@@ -516,10 +542,11 @@ async function doStart(sample) {
       body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
     })
     selectedTask.value = r.session_id
+    taskOf(r.session_id).autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
     taskOf(r.session_id)
     state.currentModel = r.model || state.currentModel
     const queued = state.queue.queued.includes(r.session_id)
-    const nightTag = nightMode.value && !sample ? '🌙 夜间模式：' : ''
+    const nightTag = nightMode.value && !sample ? '🔁 自动重试：' : ''
     if (r.resumed) {
       toast(`${nightTag}已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
     }
@@ -573,6 +600,9 @@ onMounted(async () => {
 .grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
 .grow { flex: 1; min-width: 260px; }
 .task-sel { max-width: 340px; font-size: 13px; padding: 4px 8px; vertical-align: middle; }
+.feed-stats { font-size: 12px; }
+.force-tag { background: #3a2c12; color: #ffa300; }
+.retry-tag { background: #1f2c3a; color: #10aeff; }
 .title.sub { margin-top: 6px; font-size: 14px; }
 .feed { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
 .feed-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 4px; border-radius: 6px; }

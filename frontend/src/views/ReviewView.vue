@@ -127,7 +127,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { state, api, toast } from '../store.js'
+import { state, api, toast, markForced } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 import SessionManager from '../components/SessionManager.vue'
 
@@ -231,7 +231,8 @@ function onPhotoDeleted(p) {
 
 async function rescoreOne(p) {
   try {
-    await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
+    const r = await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
+    markForced(r.session_id, [p.filename])
     toast(`已提交复检：${p.filename}，完成后自动刷新`)
   } catch (e) {
     toast(e.message, true)
@@ -241,6 +242,9 @@ async function rescoreOne(p) {
 async function rescoreAllFailed() {
   try {
     const r = await api('/api/rescore', { method: 'POST', body: JSON.stringify({ all: true }) })
+    // 全部失败重试：把当前会话清单里失败照片标记为强制
+    const failed = photos.value.filter((x) => x.status === 'parse_fail' || x.status === 'failed')
+    markForced(r.session_id, failed.map((x) => x.filename))
     toast(`已提交 ${r.count} 张失败重试`)
     setTimeout(() => { onSessionChange() }, 1500) // 重试完成后刷新
   } catch (e) {

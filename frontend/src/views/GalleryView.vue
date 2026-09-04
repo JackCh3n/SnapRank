@@ -114,7 +114,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { state, taskOf, api, toast, refreshState } from '../store.js'
+import { state, taskOf, api, toast, refreshState, markForced } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 
 const items = ref([])
@@ -254,10 +254,11 @@ async function rescoreSelected() {
   rescoreTotal.value = targets.length
   pendingKeys = new Set(targets.map((p) => `${p.session_id}|${p.filename}`))
   try {
-    await api('/api/rescore', {
+    const r = await api('/api/rescore', {
       method: 'POST',
       body: JSON.stringify({ ids: targets.map((p) => p.id), force: true }),
     })
+    markForced(r.session_id, targets.map((p) => p.filename))
   } catch (e) {
     toast(e.message, true)
     stopRescoreWatch()
