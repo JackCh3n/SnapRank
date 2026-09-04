@@ -94,7 +94,7 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="running" :list="items"
-      @close="closePreview" @navigate="onNavigate" />
+      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
@@ -186,6 +186,12 @@ async function onRescore(p) {
 
 function onNavigate(newPhoto) {
   preview.value = newPhoto
+}
+
+// 弹窗内删除了源文件：重新加载当前页（记录保留，明细里仍可见）
+function onPhotoDeleted() {
+  preview.value = null
+  load(1)
 }
 
 

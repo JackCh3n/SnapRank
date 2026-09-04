@@ -115,7 +115,28 @@
           <span class="pm-flex"></span>
           <button v-if="canRescore" class="btn plain small" :disabled="busy"
             title="重新调用 AI 评分（忽略缓存）" @click="startRescore">↻ 复检重评</button>
+          <button class="btn plain small danger-text" :disabled="deleting" title="删除源文件和 RAW 伴生文件（评分记录保留）；快捷键 Delete"
+            @click="confirmDel = true">🗑 删除文件</button>
           <button class="btn plain small" @click="$emit('close')">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 删除二次确认（删源文件+RAW，数据库记录保留） -->
+    <div v-if="confirmDel" class="pm-mask pm-del-mask" @click.self="confirmDel = false">
+      <div class="pm-card pm-del-card">
+        <h3 class="title" style="color: var(--danger)">⚠️ 删除文件确认</h3>
+        <div style="margin: 8px 0">
+          将删除源文件<span v-if="p.raw_siblings && p.raw_siblings.length">及 {{ p.raw_siblings.length }} 个 RAW/伴生文件</span>：<br />
+          <b class="pm-err-detail">{{ p.src_path }}</b><br />
+          <span class="muted">评分记录与历史保留（下次遇到同图不会重复评分）</span>
+        </div>
+        <div v-if="delError" class="error-text" style="margin-bottom: 8px">{{ delError }}</div>
+        <div class="row" style="justify-content: flex-end">
+          <button class="btn plain" @click="confirmDel = false">取消</button>
+          <button class="btn danger" :disabled="deleting" @click="doDelete">
+            {{ deleting ? '删除中…' : '确认删除' }}
+          </button>
         </div>
       </div>
     </div>
@@ -131,7 +152,7 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
   list: { type: Array, default: () => [] }, // 所属批次照片列表（用于上一张/下一张）
 })
-const emit = defineEmits(['close', 'rescore', 'navigate'])
+const emit = defineEmits(['close', 'rescore', 'navigate', 'deleted'])
 
 const p = computed(() => props.photo)
 const sharing = ref(false)
@@ -180,17 +201,43 @@ function nav(dir) {
   emit('navigate', props.list[ni])
 }
 
-// ESC 关闭；←/→ 切换
+// ESC 关闭；←/→ 切换；Delete 删除文件（进二次确认）
 function onKey(e) {
+  const tag = (e.target && e.target.tagName) || ''
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return // 输入框中不拦截
   if (e.key === 'Escape') emit('close')
   if (e.key === 'ArrowLeft') nav(-1)
   if (e.key === 'ArrowRight') nav(1)
+  if (e.key === 'Delete' && !rescoring.value) confirmDel.value = true
 }
 onMounted(() => {
   window.addEventListener('keydown', onKey)
   loadHistory() // 首次打开弹窗加载评分历史
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+
+// ---------- 删除源文件（记录保留） ----------
+const confirmDel = ref(false)
+const deleting = ref(false)
+const delError = ref('')
+async function doDelete() {
+  deleting.value = true
+  delError.value = ''
+  try {
+    const r = await api('/api/gallery/delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids: [p.value.id], delete_raw: true }),
+    })
+    confirmDel.value = false
+    emit('close')
+    if (r.missing > 0) toast('源文件本已不存在（记录已保留）')
+    else toast(`已删除源文件${r.raws ? `及 ${r.raws} 个 RAW/伴生文件` : ''}（评分记录保留）`)
+    emit('deleted', p.value)
+  } catch (e) {
+    delError.value = e.message
+  }
+  deleting.value = false
+}
 
 // ---------- 评分历史 ----------
 const history = ref([])
@@ -209,7 +256,7 @@ function selectHistory(i) {
 async function loadHistory() {
   if (!p.value || !p.value.id) { history.value = []; viewIdx.value = -1; return }
   try {
-    history.value = await api(`/api/photo/scores?id=${p.value.id}`)
+    history.value = (await api(`/api/photo/scores?id=${p.value.id}`)) || [] // 兼容旧服务端返回 null
   } catch {
     history.value = []
   }
@@ -557,4 +604,10 @@ async function copyShareCard() {
 .pm-rescore-result.err { background: rgba(250, 81, 81, 0.08); color: var(--danger); }
 .pm-rescore-hint { color: var(--text-2); font-size: 12px; margin-top: 4px; }
 .pm-flex { flex: 1; }
+.danger-text { color: var(--danger); }
+.pm-del-mask { z-index: 120; }
+.pm-del-card {
+  width: min(520px, 92vw); max-height: none; padding: 16px 18px;
+  border: 2px solid var(--danger); display: block; overflow: visible;
+}
 </style>

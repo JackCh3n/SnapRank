@@ -451,7 +451,7 @@ func (s *Store) SavePhotoModelScore(photoID int64, model, promptVersion string, 
 	return err
 }
 
-// GetPhotoModelScores 获取照片的全部多模型评分历史
+// GetPhotoModelScores 获取照片的全部多模型评分历史（无记录时返回空数组而非 null，避免序列化成 JSON null）
 func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 	rows, err := s.db.Query(`SELECT model, prompt_version, score, dims, tags, strength, weakness, source, created_at
 		FROM photo_scores WHERE photo_id=? ORDER BY created_at DESC`, photoID)
@@ -459,7 +459,7 @@ func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var list []*PhotoModelScore
+	list := make([]*PhotoModelScore, 0, 8)
 	for rows.Next() {
 		var m PhotoModelScore
 		var dimsJSON, tagsJSON sql.NullString

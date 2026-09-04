@@ -117,7 +117,7 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="state.running" :list="photos"
-      @close="closePreview" @navigate="onNavigate" />
+      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
@@ -220,6 +220,13 @@ function closePreview() {
 
 function onNavigate(newPhoto) {
   preview.value = newPhoto
+}
+
+// 弹窗内删除了源文件：从列表移除并刷新汇总
+function onPhotoDeleted(p) {
+  photos.value = photos.value.filter((x) => x.id !== p.id)
+  preview.value = null
+  api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
 }
 
 async function rescoreOne(p) {

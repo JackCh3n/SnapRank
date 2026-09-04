@@ -16,6 +16,9 @@
             搜索文件名
             <input v-model="search" style="width: 180px" @input="applyFilters" placeholder="留空=全部" />
           </label>
+          <label class="field row" style="flex-direction: row; align-items: center; gap: 6px">
+            <input v-model="onlySelected" type="checkbox" @change="applyFilters" /> 只看已选（{{ selected.size }}）
+          </label>
           <span class="muted">共 {{ items.length }} 张（跨全部批次按源文件去重）</span>
         </div>
         <div class="row">
@@ -75,7 +78,7 @@
     <div class="card" v-else><span class="muted">没有照片：先到「运行」页完成一次评分，或调整筛选</span></div>
 
     <PhotoModal v-if="preview" :photo="preview" :busy="false" :list="filtered"
-      @close="preview = null" @navigate="onNavigate" />
+      @close="preview = null" @navigate="onNavigate" @deleted="onDeleted" />
 
     <!-- 删除二次预览确认 -->
     <div v-if="confirmOpen" class="cf-mask" @click.self="confirmOpen = false">
@@ -103,7 +106,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state, taskOf, api, toast, refreshState } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 
@@ -113,6 +116,7 @@ const selected = ref(new Set())
 const preview = ref(null)
 const band = ref('')
 const search = ref('')
+const onlySelected = ref(false) // 只看已选：界面仅展示勾选的照片
 const deleting = ref(false)
 const deleteRaw = ref(true)
 const delResult = ref(null)
@@ -158,11 +162,15 @@ function applyFilters() {
     const q = search.value.toLowerCase()
     list = list.filter((p) => p.filename.toLowerCase().includes(q))
   }
+  if (onlySelected.value) list = list.filter((p) => selected.value.has(p.id))
   filtered.value = list
   // 清掉已不在列表中的选择
   const ids = new Set(filtered.value.map((p) => p.id))
-  selected.value = new Set([...selected.value].filter((id) => ids.has(id)))
+  const next = new Set([...selected.value].filter((id) => ids.has(id)))
+  if (next.size !== selected.value.size) selected.value = next
 }
+// 「只看已选」模式下取消勾选时视图实时跟随（size 不变时不触发，天然防循环）
+watch(() => selected.value.size, () => { if (onlySelected.value) applyFilters() })
 
 const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).length)
 const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))
@@ -184,12 +192,24 @@ function selectLow() {
     toast('没有低于该分数的照片')
     return
   }
-  band.value = 'low' // 页面同步筛选到低分
+  band.value = '' // 「只看已选」已覆盖筛选视图，清空分数段避免双重过滤混淆
+  search.value = ''
+  onlySelected.value = true // 页面只展示这批勾选的照片
   applyFilters()
-  toast(`已选中 ${selected.value.size} 张低分照片，页面已筛选`)
+  toast(`已选中 ${selected.value.size} 张低分照片，页面已只展示这些（取消勾选即从视图移除）`)
 }
 function onNavigate(newPhoto) {
   preview.value = newPhoto
+}
+
+// 弹窗内删除成功：从列表移除（源文件已删，后端图库不再返回它）
+function onDeleted(photo) {
+  items.value = items.value.filter((p) => p.id !== photo.id)
+  const s = new Set(selected.value)
+  s.delete(photo.id)
+  selected.value = s
+  applyFilters()
+  preview.value = null
 }
 
 // ---------- 批量重评（跨批次：后端按所属批次分组入队） ----------
