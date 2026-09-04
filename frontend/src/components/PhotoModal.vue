@@ -201,10 +201,15 @@ function nav(dir) {
   emit('navigate', props.list[ni])
 }
 
-// ESC 关闭；←/→ 切换；Delete 删除文件（进二次确认）
+// ESC 关闭；←/→ 切换；Delete 删除文件（进二次确认）；确认层打开时 Enter 确认、Esc 仅取消确认
 function onKey(e) {
   const tag = (e.target && e.target.tagName) || ''
   if (tag === 'INPUT' || tag === 'TEXTAREA') return // 输入框中不拦截
+  if (confirmDel.value) {
+    if (e.key === 'Enter') doDelete()
+    else if (e.key === 'Escape') confirmDel.value = false
+    return
+  }
   if (e.key === 'Escape') emit('close')
   if (e.key === 'ArrowLeft') nav(-1)
   if (e.key === 'ArrowRight') nav(1)
@@ -221,6 +226,7 @@ const confirmDel = ref(false)
 const deleting = ref(false)
 const delError = ref('')
 async function doDelete() {
+  if (deleting.value) return
   deleting.value = true
   delError.value = ''
   try {

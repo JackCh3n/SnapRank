@@ -310,6 +310,7 @@ async function removeRecords() {
 }
 
 async function doDelete() {
+  if (deleting.value) return
   // 过滤掉源文件已不存在的（无可删）
   const targets = filtered.value.filter((p) => selected.value.has(p.id) && p.present)
   if (!targets.length) {
@@ -333,6 +334,16 @@ async function doDelete() {
 }
 
 function onKey(e) {
+  // 删除确认弹窗打开时：Enter 确认删除，Esc 仅取消确认
+  if (confirmOpen.value) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      doDelete()
+    } else if (e.key === 'Escape') {
+      confirmOpen.value = false
+    }
+    return
+  }
   if (e.key === 'a' && (e.ctrlKey || e.metaKey) && state.page === 'gallery') {
     e.preventDefault()
     selectAll()
