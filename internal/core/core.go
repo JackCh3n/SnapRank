@@ -454,7 +454,9 @@ type GalleryItem struct {
 
 var rawSiblingExts = []string{".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
 
-// Gallery 图库：所有批次照片按源文件去重
+// Gallery 图库：所有批次照片按源文件去重。
+// 不展示不支持的格式（RAW/HEIC 等登记项）与源文件已删除的照片；
+// 数据库记录均保留（去重与评分缓存仍生效，下次同图不重复评分）。
 func (c *Core) Gallery() ([]*GalleryItem, error) {
 	photos, err := c.st.GalleryList()
 	if err != nil {
@@ -462,12 +464,16 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 	}
 	out := make([]*GalleryItem, 0, len(photos))
 	for _, p := range photos {
+		if p.Status == store.StatusUnsupported {
+			continue
+		}
 		it := &GalleryItem{Photo: p}
 		if st, err := os.Stat(p.SrcPath); err == nil {
 			it.Present = true
 			it.Size = st.Size()
+		} else {
+			continue // 源文件已删除：不再展示（记录保留在库中）
 		}
-		// 源文件已删除的也保留展示（标记 Present=false，不可再删除）
 		base := strings.TrimSuffix(p.SrcPath, filepath.Ext(p.SrcPath))
 		selfExt := filepath.Ext(p.SrcPath)
 		for _, ext := range rawSiblingExts {

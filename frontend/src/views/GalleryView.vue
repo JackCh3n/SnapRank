@@ -55,8 +55,8 @@
 
     <div class="card" v-if="filtered.length">
       <div class="photo-grid">
-        <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id), missing: !p.present }"
-          @click="preview = p" :title="p.present ? '点击查看大图；勾选左上角选择框进行批量操作' : '源文件已删除（评分记录保留）'">
+        <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id) }"
+          @click="preview = p" title="点击查看大图；勾选左上角选择框进行批量操作">
           <div class="thumb-wrap">
             <input type="checkbox" class="sel-box" :checked="selected.has(p.id)"
               @click.stop="toggleSelect(p)" />
@@ -67,8 +67,7 @@
           <div class="p-name" :title="p.src_path">{{ p.filename }}</div>
           <div class="p-meta muted">
             <span v-if="p.raw_siblings && p.raw_siblings.length" class="tag raw-tag">含 RAW</span>
-            <span v-if="!p.present" class="tag raw-tag">源文件已删</span>
-            <span v-if="p.present">{{ (p.size / 1048576).toFixed(1) }} MB</span>
+            <span>{{ (p.size / 1048576).toFixed(1) }} MB</span>
           </div>
         </div>
       </div>
