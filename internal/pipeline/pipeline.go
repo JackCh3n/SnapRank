@@ -658,7 +658,9 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 			failed += counts[store.StatusParseFail] // 夜间模式目标两类清零
 		}
 		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: failed, Night: opts.Night}})
-		// 当前任务结束：拉起下一个排队任务
+		// 先复位运行态再拉起排队任务：popAndRun 依赖 running=false 才会取任务，
+		// 不能依赖 defer 的复位时机（那要等本 goroutine 返回，队列会永远卡住）
+		e.running.Store(false)
 		e.publishQueue()
 		e.popAndRun()
 	}()
