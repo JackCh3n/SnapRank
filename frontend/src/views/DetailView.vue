@@ -50,6 +50,7 @@
             </select>
           </label>
           <a class="btn plain" href="/api/report" download>导出 report.csv</a>
+          <a class="btn small" :href="exportUrl" download>⬇ 导出当前筛选 CSV</a>
         </div>
         <div class="row">
           <button class="btn plain small" :disabled="page <= 1" @click="load(page - 1)">上一页</button>
@@ -71,7 +72,7 @@
         </thead>
         <tbody>
           <tr v-for="p in items" :key="p.id">
-            <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}`" class="mini clickable"
+            <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" class="mini clickable"
               loading="lazy" @click="preview = p" title="点击查看大图" /></td>
             <td class="clip" :title="p.src_path">{{ p.filename }}</td>
             <td><span class="tag" :class="{ warn: p.status !== 'scored' }">{{ statusLabel(p.status) }}</span></td>
@@ -120,6 +121,7 @@ const running = ref(false)
 const modelFilter = ref('')
 const sourceFilter = ref('')
 const bandFilter = ref('')
+const exportUrl = ref('/api/report/export')
 const sessionID = ref('')
 const sessions = ref([])
 const showManager = ref(false)
@@ -221,6 +223,7 @@ async function load(pg) {
     sort: sortKey.value, order: sortAsc.value ? 'asc' : 'desc',
     model: modelFilter.value, source: sourceFilter.value, band: bandFilter.value,
   })
+  exportUrl.value = `/api/report/export?${qs}`
   const r = await api(`/api/photos?${qs}`)
   items.value = r.items || []
   total.value = r.total || 0

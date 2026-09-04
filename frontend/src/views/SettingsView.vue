@@ -150,6 +150,11 @@
         <button class="btn plain" :disabled="purging" @click="purgeDB">{{ purging ? '清理中…' : '🧹 清理记录' }}</button>
         <span class="muted">删除该天数之前的批次、评分明细、评分缓存与 API 用量记录；配置与压缩缓存不受影响</span>
       </div>
+      <div class="row" style="margin-top: 8px">
+        <button class="btn plain" :disabled="backing" @click="backupDB">{{ backing ? '备份中…' : '💾 立即备份' }}</button>
+        <span class="muted">每日自动备份一次（数据目录 backups\，保留最近 7 份）；此按钮可随时手动备份</span>
+      </div>
+      <div v-if="backupMsg" class="muted" style="margin-top: 6px">{{ backupMsg }}</div>
       <div v-if="purgeMsg" class="muted" style="margin-top: 6px">{{ purgeMsg }}</div>
     </div>
 
@@ -255,6 +260,20 @@ async function saveAsPreset() {
 const purging = ref(false)
 const purgeDays = ref(30)
 const purgeMsg = ref('')
+const backing = ref(false)
+const backupMsg = ref('')
+
+async function backupDB() {
+  backing.value = true
+  backupMsg.value = ''
+  try {
+    const r = await api('/api/db/backup', { method: 'POST', body: '{}' })
+    backupMsg.value = `✅ 已备份：${r.path}`
+  } catch (e) {
+    backupMsg.value = '备份失败：' + e.message
+  }
+  backing.value = false
+}
 
 async function purgeDB() {
   if (!confirm(`确定清理 ${purgeDays.value} 天前的记录？

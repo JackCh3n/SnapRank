@@ -99,6 +99,7 @@ func serveCmd(args []string) {
 	c := mustCore(*dataDir)
 	defer c.Close()
 	defer logutil.Close()
+	c.StartAutoBackup() // 每日自动备份数据库（保留最近 7 份）
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

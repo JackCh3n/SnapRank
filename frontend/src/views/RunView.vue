@@ -150,7 +150,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { state, taskOf, api, toast, refreshState, refreshModels } from '../store.js'
+import { state, taskOf, api, toast, refreshState, refreshModels, requestNotifyPermission } from '../store.js'
 
 const loadingModels = ref(false)
 const picking = ref(false)
@@ -521,6 +521,7 @@ async function loadModels() {
 
 // 开始评分：任务创建后立即返回（后台排队执行），可继续添加新任务
 async function doStart(sample) {
+  requestNotifyPermission() // 任务完成时弹系统通知（首次会请求权限，用户在场）
   // 未选模型时兜底为当前模型，不传空值覆盖有效默认（避免评分卡死）
   if (!state.selModel && state.currentModel) state.selModel = state.currentModel
   if (state.selModel && state.selModel !== state.currentModel) {

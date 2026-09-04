@@ -57,7 +57,7 @@
         <div v-for="p in photos" :key="p.id" class="photo-card">
           <div class="thumb-wrap clickable" :class="{ 'parse-fail': p.status === 'parse_fail' }"
             @click="preview = p" title="点击查看大图与评分详情">
-            <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
+            <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" loading="lazy" @error="thumbFail(p)" />
             <div v-else class="no-thumb">缓存命中<br />无压缩图</div>
             <span class="score-badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
           </div>

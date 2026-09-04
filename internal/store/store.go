@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -189,6 +190,14 @@ CREATE TABLE IF NOT EXISTS spend_log (
 
 // Close 关闭数据库
 func (s *Store) Close() error { return s.db.Close() }
+
+// BackupTo 在线备份到目标路径（VACUUM INTO 生成一致性快照，WAL 模式下安全）。
+// 目标文件必须不存在，调用方负责命名与轮转清理。
+func (s *Store) BackupTo(dest string) error {
+	os.Remove(dest) // VACUUM INTO 要求目标不存在
+	_, err := s.db.Exec(`VACUUM INTO ?`, dest)
+	return err
+}
 
 func now() string { return time.Now().Format("2006-01-02 15:04:05") }
 

@@ -70,7 +70,7 @@
           <div class="thumb-wrap">
             <input type="checkbox" class="sel-box" :checked="selected.has(p.id)"
               @click.stop="toggleSelect(p)" />
-            <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}`" loading="lazy" @error="thumbFail(p)" />
+            <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" loading="lazy" @error="thumbFail(p)" />
             <div v-else class="no-thumb">无预览</div>
             <span class="score-badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
           </div>

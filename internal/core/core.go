@@ -3,14 +3,18 @@
 package core
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/csv"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -301,6 +305,48 @@ func (c *Core) ListPhotos(sessionID, status string, page, pageSize int, sortKey,
 
 // GetPhoto 单张明细
 func (c *Core) GetPhoto(id int64) (*store.Photo, error) { return c.st.GetPhoto(id) }
+
+// ExportCSV 按明细页同一套筛选条件导出全部记录为 CSV（流式写入 w，UTF-8 BOM 兼容 Excel）。
+// 筛选参数与 ListPhotos 一致；分页忽略（全量导出）。
+func (c *Core) ExportCSV(w http.ResponseWriter, sessionID, status, sortKey, sortDir, model, source, band string) error {
+	if sessionID == "" {
+		if sess, err := c.st.LastSession(); err == nil {
+			sessionID = sess.ID
+		}
+	}
+	res, err := c.ListPhotos(sessionID, status, 1, 1<<20, sortKey, sortDir, model, source, band)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="snaprank-photos.csv"`)
+	bw := bufio.NewWriter(w)
+	bw.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM：Excel 识别
+	cw := csv.NewWriter(bw)
+	cw.Write([]string{"文件名", "批次", "状态", "总分", "技术", "构图", "内容", "色彩", "标签", "优点", "不足", "模型", "来源", "评分时间", "源路径"})
+	for _, p := range res.Items {
+		dims := p.Dims
+		cw.Write([]string{
+			p.Filename, p.SessionID, p.Status,
+			fmt.Sprintf("%.1f", p.Score),
+			dim(dims, func(d *store.Dims) float64 { return d.Technique }),
+			dim(dims, func(d *store.Dims) float64 { return d.Composition }),
+			dim(dims, func(d *store.Dims) float64 { return d.Content }),
+			dim(dims, func(d *store.Dims) float64 { return d.Color }),
+			strings.Join(p.Tags, " "),
+			p.Strength, p.Weakness, p.Model, p.Source, p.UpdatedAt, p.SrcPath,
+		})
+	}
+	cw.Flush()
+	return bw.Flush()
+}
+
+func dim(d *store.Dims, get func(*store.Dims) float64) string {
+	if d == nil {
+		return ""
+	}
+	return fmt.Sprintf("%.1f", get(d))
+}
 
 // SetPhotoBucket 手动调档（阶段二执行时生效）
 func (c *Core) SetPhotoBucket(id int64, bucket string) error {
@@ -675,6 +721,75 @@ func (c *Core) ReportPath() (string, error) {
 
 // DataDir 数据目录
 func (c *Core) DataDir() string { return c.snapshotConfig().Paths.DataDir }
+
+// ---------- 数据库自动备份 ----------
+
+const backupKeep = 7 // 保留最近 N 份
+
+// BackupNow 立即备份一次到 <dataDir>/backups/snaprank-YYYYMMDD-HHMMSS.db，返回目标路径
+func (c *Core) BackupNow() (string, error) {
+	dir := filepath.Join(c.DataDir(), "backups")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(dir, fmt.Sprintf("snaprank-%s.db", time.Now().Format("20060102-150405")))
+	if err := c.st.BackupTo(dest); err != nil {
+		return "", err
+	}
+	c.rotateBackups(dir)
+	return dest, nil
+}
+
+// rotateBackups 轮转：按文件名倒序保留最近 backupKeep 份，其余删除
+func (c *Core) rotateBackups(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "snaprank-") && strings.HasSuffix(e.Name(), ".db") {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(files))) // 文件名含时间戳，倒序即最新在前
+	for i, f := range files {
+		if i >= backupKeep {
+			os.Remove(f)
+		}
+	}
+}
+
+// StartAutoBackup 启动每日自动备份：启动时先检查当天是否已备，之后每 6 小时检查一次
+func (c *Core) StartAutoBackup() {
+	go func() {
+		day := ""
+		check := func() {
+			today := time.Now().Format("20060102")
+			if day == today {
+				return
+			}
+			// 当天已有备份则跳过（按文件名前缀判断）
+			matches, _ := filepath.Glob(filepath.Join(c.DataDir(), "backups", "snaprank-"+today+"-*.db"))
+			if len(matches) > 0 {
+				day = today
+				return
+			}
+			if _, err := c.BackupNow(); err != nil {
+				logutil.Error("数据库自动备份失败: %v", err)
+			} else {
+				day = today
+				logutil.Info("数据库已自动备份（保留最近 %d 份）", backupKeep)
+			}
+		}
+		check()
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			check()
+		}
+	}()
+}
 
 func sanitizeErr(err error) string {
 	msg := err.Error()

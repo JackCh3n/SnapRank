@@ -4,7 +4,7 @@
       <!-- 照片区 -->
       <div class="pm-photo">
         <button v-if="hasPrev" class="pm-nav prev" title="上一张（←）" @click.stop="nav(-1)">‹</button>
-        <img v-if="!noThumb" :src="`/api/thumb?id=${p.id}`" @error="noThumb = true" @click="$emit('close')" />
+        <img v-if="!noThumb" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" @error="noThumb = true" @click="$emit('close')" />
         <div v-else class="pm-noimg">缓存命中，无压缩图预览</div>
         <button v-if="hasNext" class="pm-nav next" title="下一张（→）" @click.stop="nav(1)">›</button>
         <span class="pm-badge" :class="badgeClass">{{ badgeText }}</span>
@@ -398,7 +398,7 @@ function wrapText(ctx, text, maxWidth) {
 }
 
 async function buildShareCard(photo) {
-  const img = await loadImg(`/api/thumb?id=${photo.id}`)
+  const img = await loadImg(`/api/thumb?id=${photo.id}&v=${(photo.fingerprint || '').slice(0, 12)}`)
   const W = 900, pad = 28
   const imgH = Math.round(W * (img.naturalHeight / img.naturalWidth))
   const canvas = document.createElement('canvas')

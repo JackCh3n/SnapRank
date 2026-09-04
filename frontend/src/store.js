@@ -56,6 +56,25 @@ export function toast(msg, isErr = false) {
   toastTimer = setTimeout(() => (state.toast = null), 3500)
 }
 
+// ---------- Windows 系统通知（浏览器 Web Notification = 系统 toast） ----------
+// 夜间挂机场景页面保持打开，任务完成时弹系统级通知（Windows 通知中心可见）。
+// 权限在开始评分时请求一次（用户在场，避免冷弹权限框）。
+export function requestNotifyPermission() {
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  } catch { /* 不支持则静默 */ }
+}
+
+function notifyDesktop(title, body) {
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return
+    const n = new Notification(title, { body, tag: 'snaprank-task', silent: false })
+    setTimeout(() => n.close(), 10000)
+  } catch { /* 通知失败不影响主流程 */ }
+}
+
 export async function api(path, opts = {}) {
   if (localStorage.getItem('sr_debug') === '1') {
     console.log(`[api] → ${opts.method || 'GET'} ${path}`, opts.body || '')
@@ -169,17 +188,23 @@ export function connectSSE() {
       }
     }
     toast(`🔁 自动重试第 ${d.round} 轮：剩余 ${d.remaining} 张，${d.delay_sec}s 后开始`)
+    notifyDesktop('SnapRank 自动重试', `第 ${d.round} 轮：剩余 ${d.remaining} 张，${d.delay_sec}s 后开始`)
   })
   es.addEventListener('done', (e) => {
     const d = JSON.parse(e.data)
     const t = taskOf(d.session_id)
     if (t) t.finished = true
     refreshState()
-    if (d.stopped) toast(`任务 ${d.session_id} 已停止`)
-    else if (d.night) {
-      toast(d.failed > 0
-        ? `🔁 自动重试结束：仍有 ${d.failed} 张持续失败（已停止重试）`
-        : '🔁 自动重试结束：全部评分成功')
+    if (d.stopped) {
+      toast(`任务 ${d.session_id} 已停止`)
+      notifyDesktop('SnapRank 任务已停止', d.session_id)
+    } else if (d.night) {
+      const ok = d.failed > 0
+      const msg = ok ? `仍有 ${d.failed} 张持续失败（已停止重试）` : '全部评分成功'
+      toast(`🔁 自动重试结束：${msg}`)
+      notifyDesktop(ok ? 'SnapRank 重试结束（有失败）' : 'SnapRank 评分全部完成', msg)
+    } else {
+      notifyDesktop('SnapRank 任务完成', d.session_id)
     }
   })
   es.addEventListener('error', (e) => {

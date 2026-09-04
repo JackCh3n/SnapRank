@@ -56,6 +56,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/photo/scores", s.handlePhotoScores)
 	s.mux.HandleFunc("GET /api/import-dir", s.handleGetImportDir)
 	s.mux.HandleFunc("POST /api/db/purge", s.handleDBPurge)
+	s.mux.HandleFunc("POST /api/db/backup", s.handleDBBackup)
 	s.mux.HandleFunc("POST /api/preset/upsert", s.handlePresetUpsert)
 	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
 	s.mux.HandleFunc("POST /api/preset/delete", s.handlePresetDelete)
@@ -78,6 +79,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
+	s.mux.HandleFunc("GET /api/report/export", s.handleReportExport)
 	s.mux.HandleFunc("POST /api/open", s.handleOpen)
 	s.mux.HandleFunc("GET /api/events", s.handleEvents)
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -247,6 +249,16 @@ func (s *Server) handleDBPurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, res)
+}
+
+// handleDBBackup 立即备份数据库一次
+func (s *Server) handleDBBackup(w http.ResponseWriter, r *http.Request) {
+	dest, err := s.core.BackupNow()
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"path": dest})
 }
 
 func (s *Server) handlePresetUpsert(w http.ResponseWriter, r *http.Request) {
@@ -665,8 +677,10 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no thumb", 404)
 		return
 	}
+	// 内容寻址缓存：前端 URL 带 v=<fingerprint>，指纹变则 URL 变自动失效，
+	// 可放心长缓存（immutable 免去过期协商请求）
 	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "max-age=3600")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, p)
 }
 
@@ -679,6 +693,15 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=report.csv")
 	http.ServeFile(w, r, p)
+}
+
+// handleReportExport 按评分明细页的筛选条件导出 CSV（参数与 /api/photos 一致，全量不分页）
+func (s *Server) handleReportExport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if err := s.core.ExportCSV(w, q.Get("session"), q.Get("status"), q.Get("sort"), q.Get("order"), q.Get("model"), q.Get("source"), q.Get("band")); err != nil {
+		// 头已可能写出，只能断流报错
+		http.Error(w, err.Error(), 500)
+	}
 }
 
 func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
