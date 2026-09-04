@@ -30,6 +30,16 @@ export function markForced(sessionId, filenames) {
   for (const f of filenames || []) state.forcedFiles.add(sessionId + '|' + f)
 }
 
+// 复检重评：与「开始评分」行为一致——先把运行页选中的模型应用为默认，再提交重评。
+// 否则配置默认可能是已失效的旧模型（如平台已下架），重评会一直 404 重试。
+export async function rescorePhotos(body) {
+  if (state.selModel && state.currentModel && state.selModel !== state.currentModel) {
+    await api('/api/model', { method: 'POST', body: JSON.stringify({ id: state.selModel }) })
+    state.currentModel = state.selModel
+  }
+  return api('/api/rescore', { method: 'POST', body: JSON.stringify(body) })
+}
+
 // 获取（或初始化）某任务的进度容器
 export function taskOf(sid) {
   if (!sid) return null

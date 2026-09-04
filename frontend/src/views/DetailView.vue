@@ -104,7 +104,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api, toast, state, markForced } from '../store.js'
+import { api, toast, state, markForced, rescorePhotos } from '../store.js'
 import PhotoModal from '../components/PhotoModal.vue'
 import SessionManager from '../components/SessionManager.vue'
 
@@ -174,7 +174,7 @@ function closePreview() {
 async function onRescore(p) {
   running.value = true
   try {
-    const r = await api('/api/rescore', { method: 'POST', body: JSON.stringify({ ids: [p.id], force: true }) })
+    const r = await rescorePhotos({ ids: [p.id], force: true })
     markForced(r.session_id, [p.filename])
     toast(`已提交复检：${p.filename}，完成后自动刷新`)
     preview.value = null
