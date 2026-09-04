@@ -462,8 +462,12 @@ func (s *Store) SavePhotoModelScore(photoID int64, model, promptVersion string, 
 
 // GetPhotoModelScores 获取照片的全部多模型评分历史（无记录时返回空数组而非 null，避免序列化成 JSON null）
 func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
-	rows, err := s.db.Query(`SELECT model, prompt_version, score, dims, tags, strength, weakness, source, created_at
-		FROM photo_scores WHERE photo_id=? ORDER BY created_at DESC`, photoID)
+	// 按内容指纹聚合：跨批次重新扫描会为同一张图生成新 photo id，
+	// 历史必须按指纹关联才能在弹窗里看到这张图的全部评分记录
+	rows, err := s.db.Query(`SELECT ps.model, ps.prompt_version, ps.score, ps.dims, ps.tags, ps.strength, ps.weakness, ps.source, ps.created_at
+		FROM photo_scores ps
+		WHERE ps.photo_id IN (SELECT id FROM photos WHERE fingerprint = (SELECT fingerprint FROM photos WHERE id = ?))
+		ORDER BY ps.created_at DESC`, photoID)
 	if err != nil {
 		return nil, err
 	}

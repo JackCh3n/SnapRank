@@ -115,15 +115,16 @@
           <h3 class="title sub">
             {{ stageLabel }} {{ doneCount }}/{{ totalStr }}
             <span class="eta" v-if="etaText">{{ etaText }}</span>
-            <span class="row" style="margin-left: auto; gap: 8px; align-items: center">
+            <span v-if="isCurrent" class="row" style="margin-left: auto; gap: 8px; align-items: center">
               <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
               <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
               <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
               <button class="btn danger small" @click="doStop">■ 停止</button>
             </span>
+            <span v-else-if="task.finished" class="tag">✓ 已完成</span>
           </h3>
           <div class="muted feed-stats" v-if="feedStats" style="margin: 2px 0 6px">
-            ✅ 成功 {{ feedStats.ok }} · <span :class="{ 'error-text': feedStats.fail > 0 }">❌ 失败{{ task.autoRetry ? '待重试' : '' }} {{ feedStats.fail }}</span> · ⏳ 待评分 {{ feedStats.comp }} · 📷 剩余 {{ remainCount }}
+            ✅ 成功 {{ feedStats.ok }} · <span :class="{ 'error-text': feedStats.fail > 0 }">❌ 失败{{ task.autoRetry ? '待重试' : '' }} {{ feedStats.fail }}</span> · ⏳ 待评分 {{ feedStats.comp }}<template v-if="total"> · 📷 剩余 {{ remainCount }}</template>
           </div>
           <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
           <div class="muted" style="margin: 6px 0 10px">
@@ -282,6 +283,8 @@ const isQueued = computed(() => {
   const sid = selectedTask.value
   return !!sid && sid !== state.queue.current && state.queue.queued.includes(sid)
 })
+// 正在查看的是当前运行中的任务（暂停/继续/停止只对它有效）
+const isCurrent = computed(() => !!selectedTask.value && selectedTask.value === state.queue.current)
 
 const stage = computed(() => (task.value && task.value.stage) || '')
 const total = computed(() => (task.value && task.value.total) || 0)
