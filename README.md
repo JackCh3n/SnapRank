@@ -28,7 +28,9 @@ build-desktop.bat
 
 一键构建原生 WebView2 窗口程序 `SnapRank-desktop.exe` 并启动（无控制台）。窗口内就是完整界面；再次双击只会新开窗口指向已运行实例（单实例多窗口，共用数据）。
 
-也可以直接下载 CI Release 的 `SnapRank-windows-amd64.zip`：解压后双击 `SnapRank-desktop.exe` 或 `build.bat`。
+也可以直接下载 CI Release 的 `SnapRank-windows-amd64.zip`：解压后运行 `build.bat`（构建并启动 serve 形态，双击 exe 带控制台看日志），或按下方「开发」一节本地构建桌面壳 exe。
+
+> 桌面壳（`SnapRank-desktop.exe`）暂未随 CI 发布，属本地构建形态；如需进 Release 产物可加 CI 步骤。
 
 ### 服务模式（带控制台，便于看日志）
 
