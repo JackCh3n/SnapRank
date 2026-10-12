@@ -4,10 +4,10 @@
       <h3 class="title">① 选择照片目录</h3>
       <div class="row">
         <label class="field grow">
-          源图目录（递归扫描，支持 jpg/png/webp/gif/bmp/tiff）
-          <input v-model="state.dir" placeholder="例如 D:\\Photos\\2026-08" @keyup.enter="doScan" />
+          源图目录（递归扫描，支持 jpg/png/webp/gif/bmp/tiff；多个目录用 ; 分隔）
+          <input v-model="state.dir" placeholder="例如 D:\\Photos\\2026-08;D:\\Photos\\旅行" @keyup.enter="doScan" />
         </label>
-        <button class="btn plain" :disabled="picking" :title="picking ? '请在弹出的窗口中选择目录' : '弹出系统目录选择框'"
+        <button class="btn plain" :disabled="picking" :title="picking ? '请在弹出的窗口中选择目录' : '弹出系统目录选择框（支持 Ctrl/Shift 多选）'"
           @click="pickDir">{{ picking ? '选择中…' : '📁 选择目录' }}</button>
         <label class="field">
           格式筛选
@@ -36,7 +36,7 @@
         </span>
       </div>
       <div v-if="state.scan" class="muted" style="margin-top: 8px">
-        共 {{ state.scan.count }} 张（批内去重后 {{ state.scan.live }} 张需评分），预估费用
+        共 {{ state.scan.count }} 张（批内去重后 {{ state.scan.live }} 张需评分<template v-if="state.scan.dirs > 1">，{{ state.scan.dirs }} 个目录</template>），预估费用
         <b>¥{{ state.scan.est_cost.toFixed(3) }}</b>
         <span v-if="state.scan.dupCount > 0">（重复 {{ state.scan.dupCount }} 张跳过）</span>
       </div>
@@ -172,13 +172,25 @@ function rescanIfScanned() {
 }
 
 // 弹出系统目录选择框（由本机服务端弹出），选完自动扫描
+// 多目录解析：输入框支持 ; / ；/ 换行分隔，去重保序
+function parseDirs() {
+  return [...new Set(String(state.dir || '').split(/[;；\n]/).map((s) => s.trim()).filter(Boolean))]
+}
+
 async function pickDir() {
   picking.value = true
   try {
     const r = await api('/api/pick-dir', { method: 'POST', body: '{}' })
-    if (r.dir) {
-      state.dir = r.dir
-      toast(`已选择：${r.dir}`)
+    const dirs = r.dirs || (r.dir ? [r.dir] : [])
+    if (dirs.length) {
+      // 多选时追加到已有目录之后（去重），单选直接替换
+      if (dirs.length > 1) {
+        const merged = [...new Set([...parseDirs(), ...dirs])]
+        state.dir = merged.join(';')
+      } else {
+        state.dir = dirs[0]
+      }
+      toast(dirs.length > 1 ? `已选择 ${dirs.length} 个目录` : `已选择：${dirs[0]}`)
       doScan()
     } else {
       toast('已取消选择')
@@ -363,15 +375,23 @@ const importedPreviews = ref([])
 const previewMore = computed(() => Math.max(0, importedPreviews.value.length - 30))
 
 async function doScan() {
-  if (!state.dir) return toast('请先输入目录', true)
+  const dirs = parseDirs()
+  if (!dirs.length) return toast('请先输入目录', true)
   scanning.value = true
   try {
-    const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: state.dir, formats: formatsArg.value }) })
-    const items = r.items || []
-    const live = items.filter((i) => !i.dup).length
-    const dupCount = items.length - live
-    state.scan = { count: items.length, live, est_cost: r.est_cost, dupCount }
-    toast(items.length ? `扫描完成：共 ${items.length} 张` : '扫描完成：未发现可处理的图片（可能过小或格式不符）')
+    // 多目录逐个扫描后聚合展示
+    let count = 0, live = 0, est = 0
+    for (const d of dirs) {
+      const r = await api('/api/scan', { method: 'POST', body: JSON.stringify({ dir: d, formats: formatsArg.value }) })
+      const items = r.items || []
+      count += items.length
+      live += items.filter((i) => !i.dup).length
+      est += r.est_cost || 0
+    }
+    state.scan = { count, live, est_cost: est, dupCount: count - live, dirs: dirs.length }
+    toast(count
+      ? `扫描完成：共 ${count} 张${dirs.length > 1 ? `（${dirs.length} 个目录）` : ''}`
+      : '扫描完成：未发现可处理的图片（可能过小或格式不符）')
     refreshState() // 拉取最新目录历史
   } catch (e) {
     state.scan = null
@@ -525,23 +545,32 @@ async function doStart(sample) {
   }
   starting.value = true
   try {
-    const r = await api('/api/start', {
-      method: 'POST',
-      body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
-    })
-    const t = taskOf(r.session_id)
-    t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
-    t.dir = state.dir // 排队目录名（队列视图展示用）
-    // 入队即登记该目录的图片数（待评分计数包含排队目录；失败静默，开始后 stage 会再给）
-    api(`/api/photos?session=${r.session_id}&page_size=1`).then((rr) => { if (rr.total) t.total = rr.total }).catch(() => {})
-    state.currentModel = r.model || state.currentModel
-    const queued = state.queue.queued.includes(r.session_id)
-    const nightTag = nightMode.value && !sample ? '🔁 自动重试：' : ''
-    if (r.resumed) {
-      toast(`${nightTag}继续上次：剩余 ${r.pending} 张待评分${queued ? '，已排队' : ''}`)
+    // 多目录：逐目录提交，依次进入排队（队列模型天然承接）
+    const dirs = parseDirs()
+    let resumed = 0, queued = 0, first = null
+    for (const d of dirs) {
+      const r = await api('/api/start', {
+        method: 'POST',
+        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
+      })
+      const t = taskOf(r.session_id)
+      t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
+      t.dir = d // 排队目录名（队列视图展示用）
+      // 入队即登记该目录的图片数（待评分计数包含排队目录；失败静默，开始后 stage 会再给）
+      api(`/api/photos?session=${r.session_id}&page_size=1`).then((rr) => { if (rr.total) t.total = rr.total }).catch(() => {})
+      if (r.resumed) resumed++
+      if (state.queue.queued.includes(r.session_id)) queued++
+      if (!first) first = r
     }
-    else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(r.session_id)} 个目录）`)
-    else toast(`${nightTag}开始评分（模型 ${r.model}）`)
+    state.currentModel = (first && first.model) || state.currentModel
+    const nightTag = nightMode.value && !sample ? '🔁 自动重试：' : ''
+    if (dirs.length > 1) {
+      toast(`${nightTag}已提交 ${dirs.length} 个目录${queued ? `（${queued} 个排队中` : ''}${resumed ? `${queued ? '，' : '（'}${resumed} 个续跑${queued ? '' : '）'}` : ''}）`)
+    } else if (first.resumed) {
+      toast(`${nightTag}继续上次：剩余 ${first.pending} 张待评分${queued ? '，已排队' : ''}`)
+    }
+    else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(first.session_id)} 个目录）`)
+    else toast(`${nightTag}开始评分（模型 ${first.model}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)

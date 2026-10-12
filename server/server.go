@@ -57,6 +57,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/import-dir", s.handleGetImportDir)
 	s.mux.HandleFunc("POST /api/db/purge", s.handleDBPurge)
 	s.mux.HandleFunc("POST /api/db/backup", s.handleDBBackup)
+	s.mux.HandleFunc("POST /api/db/import", s.handleDBImport)
 	s.mux.HandleFunc("POST /api/preset/upsert", s.handlePresetUpsert)
 	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
 	s.mux.HandleFunc("POST /api/preset/delete", s.handlePresetDelete)
@@ -260,6 +261,37 @@ func (s *Server) handleDBBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"path": dest})
+}
+
+// handleDBImport 上传数据库文件并合并导入（另一台电脑导出的 snaprank.db 或备份）
+func (s *Server) handleDBImport(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength <= 0 || r.ContentLength > 256<<20 {
+		writeErr(w, 400, errors.New("请上传数据库文件（不超过 256MB）"))
+		return
+	}
+	workDir := filepath.Join(s.core.DataDir(), "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	tmp, err := os.CreateTemp(workDir, "import-*.db")
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, r.Body); err != nil {
+		tmp.Close()
+		writeErr(w, 400, errors.New("上传数据读取失败: "+err.Error()))
+		return
+	}
+	tmp.Close()
+	res, err := s.core.ImportDB(tmp.Name())
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 func (s *Server) handlePresetUpsert(w http.ResponseWriter, r *http.Request) {
@@ -510,9 +542,9 @@ func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
 		SysProcAttr: &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000},
 	}
 	out, outErr := cmd.Output()
-	line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "ERROR: "))
-	// 子进程崩溃/被杀也不影响服务：有结果就解析，否则返回错误
-	if line == "" || (outErr != nil && !strings.HasPrefix(string(out), "ERROR: ") && !strings.HasPrefix(string(out), "CANCELLED")) {
+	raw := strings.TrimSpace(string(out))
+	// 子进程崩溃/被杀也不影响服务：无输出视为异常
+	if raw == "" && outErr != nil {
 		msg := "目录选择进程异常退出"
 		if outErr != nil {
 			msg += ": " + outErr.Error()
@@ -520,14 +552,22 @@ func (s *Server) handlePickDir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, errors.New(msg))
 		return
 	}
-	switch {
-	case line == "CANCELLED" || line == "":
-		writeJSON(w, 200, map[string]string{"dir": ""})
-	case strings.HasPrefix(strings.TrimSpace(string(out)), "ERROR: "):
-		writeErr(w, 500, errors.New(line))
-	default:
-		writeJSON(w, 200, map[string]string{"dir": line})
+	if strings.HasPrefix(raw, "ERROR: ") {
+		writeErr(w, 500, errors.New(strings.TrimSpace(strings.TrimPrefix(raw, "ERROR: "))))
+		return
 	}
+	if raw == "" || raw == "CANCELLED" {
+		writeJSON(w, 200, map[string]interface{}{"dir": "", "dirs": []string{}})
+		return
+	}
+	// 多选：每个目录一行
+	var dirs []string
+	for _, l := range strings.Split(raw, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			dirs = append(dirs, l)
+		}
+	}
+	writeJSON(w, 200, map[string]interface{}{"dir": dirs[0], "dirs": dirs})
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {

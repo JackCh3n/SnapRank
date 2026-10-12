@@ -5,7 +5,7 @@ package hostdialog
 
 import "errors"
 
-// PickFolder 非 Windows 占位实现
-func PickFolder(title string) (string, error) {
-	return "", errors.New("目录选择对话框仅支持 Windows")
+// PickFolders 非 Windows 占位实现
+func PickFolders() ([]string, error) {
+	return nil, errors.New("目录选择对话框仅支持 Windows")
 }

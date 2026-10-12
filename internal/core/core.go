@@ -713,6 +713,18 @@ func recycleRawSiblings(src, sessionDir string, res *GalleryDeleteResult) int {
 	return n
 }
 
+// ImportDB 合并导入外部数据库文件（另一台电脑导出的 snaprank.db 或备份）。
+// 导入前先自动备份当前库（可回滚）；评分进行中拒绝导入。
+func (c *Core) ImportDB(path string) (*store.ImportResult, error) {
+	if c.Engine().IsRunning() {
+		return nil, fmt.Errorf("评分进行中，请等待完成后再导入")
+	}
+	if _, err := c.BackupNow(); err != nil {
+		return nil, fmt.Errorf("导入前自动备份失败（已中止导入）: %w", err)
+	}
+	return c.st.ImportFromDB(path)
+}
+
 // PresetUpsert 保存平台预设（同名覆盖；apiKey 为空保持原值）
 func (c *Core) PresetUpsert(name, baseURL, apiKey, protocol string) error {
 	if name == "" {

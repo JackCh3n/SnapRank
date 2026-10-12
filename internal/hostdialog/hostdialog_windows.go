@@ -39,6 +39,7 @@ const (
 	clsctxInprocServer = 0x1
 	fosPickFolders     = 0x20
 	fosForceFilesystem = 0x40
+	fosAllowMulti      = 0x200 // 允许 Ctrl/Shift 多选目录
 	sigdnFilesysPath   = 0x80058000
 	hrCancelled        = 0x800704C7 // ERROR_CANCELLED
 	dialogTitle        = "选择照片目录"
@@ -79,7 +80,19 @@ type vtblFileOpenDialog struct {
 	SetClientGuid       uintptr
 	ClearClientData     uintptr
 	SetFilter           uintptr
-	// IFileOpenDialog 追加的 GetResults/GetSelectedItems 未使用
+	// IFileOpenDialog 在 IFileDialog（27 个方法）之后追加：
+	GetResults       uintptr // 多选结果集 IShellItemArray
+	GetSelectedItems uintptr
+}
+
+// IShellItemArray vtable（GetCount=3、GetItemAt=4）
+type vtblShellItemArray struct {
+	QueryInterface uintptr
+	AddRef         uintptr
+	Release        uintptr
+	GetCount       uintptr
+	GetItemAt      uintptr
+	EnumItems      uintptr
 }
 
 type iFileOpenDialog struct {
@@ -96,13 +109,13 @@ type vtblShellItem struct {
 	GetDisplayName uintptr
 }
 
-// PickFolder 弹出目录选择框；用户取消返回空串。
+// PickFolders 弹出目录选择框（支持 Ctrl/Shift 多选）；用户取消返回空切片。
 // 阻塞至用户选择完成，调用方需在后台 goroutine 中调用。
-func PickFolder() (string, error) {
+func PickFolders() ([]string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		return "", fmt.Errorf("COM 初始化失败: %w", err)
+		return nil, fmt.Errorf("COM 初始化失败: %w", err)
 	}
 	defer ole.CoUninitialize()
 
@@ -114,14 +127,14 @@ func PickFolder() (string, error) {
 		uintptr(unsafe.Pointer(iidFileOpenDialog)),
 		uintptr(unsafe.Pointer(&d)))
 	if hr != 0 || d == nil {
-		return "", fmt.Errorf("创建目录选择框失败: 0x%x", hr)
+		return nil, fmt.Errorf("创建目录选择框失败: 0x%x", hr)
 	}
 	defer syscall.SyscallN(d.lpVtbl.Release, uintptr(unsafe.Pointer(d)))
 
-	// 只允许选目录
+	// 只允许选目录 + 允许多选
 	if hr, _, _ := syscall.SyscallN(d.lpVtbl.SetOptions, uintptr(unsafe.Pointer(d)),
-		uintptr(fosPickFolders|fosForceFilesystem)); hr != 0 {
-		return "", fmt.Errorf("SetOptions 失败: 0x%x", hr)
+		uintptr(fosPickFolders|fosForceFilesystem|fosAllowMulti)); hr != 0 {
+		return nil, fmt.Errorf("SetOptions 失败: 0x%x", hr)
 	}
 	if t16, err := windows.UTF16PtrFromString(dialogTitle); err == nil {
 		syscall.SyscallN(d.lpVtbl.SetTitle, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(t16)))
@@ -135,34 +148,62 @@ func PickFolder() (string, error) {
 	// Show 阻塞；用户取消返回 hrCancelled
 	hr, _, _ = syscall.SyscallN(d.lpVtbl.Show, uintptr(unsafe.Pointer(d)), 0)
 	if hr == hrCancelled {
-		return "", nil
+		return nil, nil
 	}
 	if hr != 0 {
-		return "", fmt.Errorf("Show 失败: 0x%x", hr)
+		return nil, fmt.Errorf("Show 失败: 0x%x", hr)
 	}
 
-	// GetResult 取所选 IShellItem；对象首 8 字节是 vtable 指针，
-	// GetDisplayName 是 vtable 第 6 项（下标 5）。必须先读 vtable 指针再取函数——
-	// 直接把对象当 vtable 结构用会跳到对象内部数据（此前的崩溃根因）。
+	// 多选走 GetResults 枚举 IShellItemArray；异常时回退单选 GetResult，
+	// 保证最坏情况退化为单目录而不是整个选择器不可用
+	var arr unsafe.Pointer
+	if hr, _, _ := syscall.SyscallN(d.lpVtbl.GetResults, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&arr))); hr == 0 && arr != nil {
+		arrVtbl := *(*unsafe.Pointer)(arr)
+		defer syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 2*8)), uintptr(arr)) // Release
+		var count uint32
+		if hr, _, _ := syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 3*8)),
+			uintptr(arr), uintptr(unsafe.Pointer(&count))); hr == 0 {
+			dirs := make([]string, 0, count)
+			for i := uint32(0); i < count; i++ {
+				var item unsafe.Pointer
+				if hr, _, _ := syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 4*8)),
+					uintptr(arr), uintptr(i), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
+					continue
+				}
+				if p := itemDisplayName(item); p != "" {
+					dirs = append(dirs, p)
+				}
+			}
+			return dirs, nil
+		}
+	}
+
+	// 回退：单选 GetResult（对象首 8 字节是 vtable 指针，GetDisplayName 是第 6 项）
 	var item unsafe.Pointer
-	if hr, _, _ = syscall.SyscallN(d.lpVtbl.GetResult, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
-		return "", fmt.Errorf("GetResult 失败: 0x%x", hr)
+	if hr, _, _ := syscall.SyscallN(d.lpVtbl.GetResult, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
+		return nil, fmt.Errorf("GetResult 失败: 0x%x", hr)
+	}
+	if p := itemDisplayName(item); p != "" {
+		return []string{p}, nil
+	}
+	return nil, fmt.Errorf("所选目录路径为空")
+}
+
+// itemDisplayName 取 IShellItem 的文件系统路径并 Release 对象。
+// 必须先读 vtable 指针再取函数——直接把对象当 vtable 结构用会跳到对象内部数据（此前的崩溃根因）。
+func itemDisplayName(item unsafe.Pointer) string {
+	if item == nil {
+		return ""
 	}
 	itemVtbl := *(*unsafe.Pointer)(item)
 	defer syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(itemVtbl) + 2*8)), uintptr(item)) // Release
-
 	var pPath unsafe.Pointer
 	getDisplayName := *(*uintptr)(unsafe.Pointer(uintptr(itemVtbl) + 5*8))
-	if hr, _, _ = syscall.SyscallN(getDisplayName, uintptr(item), uintptr(sigdnFilesysPath), uintptr(unsafe.Pointer(&pPath))); hr != 0 || pPath == nil {
-		return "", fmt.Errorf("GetDisplayName 失败: 0x%x", hr)
+	if hr, _, _ := syscall.SyscallN(getDisplayName, uintptr(item), uintptr(sigdnFilesysPath), uintptr(unsafe.Pointer(&pPath))); hr != 0 || pPath == nil {
+		return ""
 	}
 	defer ole.CoTaskMemFree(uintptr(pPath))
-
-	path := windows.UTF16PtrToString((*uint16)(pPath))
-	if path == "" {
-		return "", fmt.Errorf("所选目录路径为空")
-	}
-	return strings.TrimRight(path, "\\"), nil
+	return strings.TrimRight(windows.UTF16PtrToString((*uint16)(pPath)), "\\")
 }
 
 // bringToFrontLoop 循环查找标题匹配的可见窗口并强制置前

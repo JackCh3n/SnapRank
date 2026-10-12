@@ -154,6 +154,14 @@
         <button class="btn plain" :disabled="backing" @click="backupDB">{{ backing ? '备份中…' : '💾 立即备份' }}</button>
         <span class="muted">每日自动备份一次（数据目录 backups\，保留最近 7 份）；此按钮可随时手动备份</span>
       </div>
+      <div class="row" style="margin-top: 8px">
+        <input ref="importInput" type="file" accept=".db,.sqlite" style="display: none" @change="onImportFile" />
+        <button class="btn plain" :disabled="importing" @click="importInput.click()">
+          {{ importing ? '导入中…' : '📥 导入数据库（合并）' }}
+        </button>
+        <span class="muted">合并另一台电脑导出的数据库或备份文件：会话/评分/缓存按指纹合并，本机已有数据不覆盖；导入前自动备份</span>
+      </div>
+      <div v-if="importMsg" class="muted" style="margin-top: 6px">{{ importMsg }}</div>
       <div v-if="backupMsg" class="muted" style="margin-top: 6px">{{ backupMsg }}</div>
       <div v-if="purgeMsg" class="muted" style="margin-top: 6px">{{ purgeMsg }}</div>
     </div>
@@ -263,6 +271,29 @@ const purgeDays = ref(30)
 const purgeMsg = ref('')
 const backing = ref(false)
 const backupMsg = ref('')
+const importing = ref(false)
+const importMsg = ref('')
+const importInput = ref(null)
+
+// 上传并合并导入数据库（另一台电脑导出的 snaprank.db / 备份）
+async function onImportFile(e) {
+  const f = e.target.files && e.target.files[0]
+  if (!f) return
+  importing.value = true
+  importMsg.value = ''
+  try {
+    const buf = await f.arrayBuffer()
+    const r = await fetch('/api/db/import', { method: 'POST', body: buf })
+    const d = await r.json().catch(() => ({}))
+    if (!r.ok) throw new Error(d.error || `导入失败（HTTP ${r.status}）`)
+    importMsg.value = `✅ 已合并：会话 ${d.sessions}、照片 ${d.photos}、评分历史 ${d.scores}、评分缓存 ${d.cache}（本机已有的保留）`
+    toast('数据库导入完成')
+  } catch (err) {
+    importMsg.value = '导入失败：' + err.message
+  }
+  e.target.value = ''
+  importing.value = false
+}
 
 async function backupDB() {
   backing.value = true

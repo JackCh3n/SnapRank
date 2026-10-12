@@ -56,15 +56,17 @@ func main() {
 		runCmd(args[1:])
 	case "pickdir":
 		// 内部子命令：弹出目录选择框并把结果写到 stdout（供服务端派生调用）。
-		// 始终正常退出，结果/错误都经 stdout 传递（父进程解析首行）。
-		dir, err := hostdialog.PickFolder()
+		// 始终正常退出；支持多选，每个目录一行，错误经 ERROR: 前缀传递。
+		dirs, err := hostdialog.PickFolders()
 		switch {
 		case err != nil:
 			fmt.Println("ERROR: " + err.Error())
-		case dir == "":
+		case len(dirs) == 0:
 			fmt.Println("CANCELLED")
 		default:
-			fmt.Println(dir)
+			for _, d := range dirs {
+				fmt.Println(d)
+			}
 		}
 	case "version", "-v", "--version":
 		fmt.Printf("SnapRank 帧选 %s\n", server.Version)

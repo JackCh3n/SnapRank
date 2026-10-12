@@ -211,6 +211,94 @@ func (s *Store) BackupTo(dest string) error {
 
 func now() string { return time.Now().Format("2006-01-02 15:04:05") }
 
+// ImportResult 数据库导入合并结果
+type ImportResult struct {
+	Sessions int `json:"sessions"` // 新增会话数
+	Photos   int `json:"photos"`   // 新增照片记录数
+	Scores   int `json:"scores"`   // 新增评分历史条数
+	Cache    int `json:"cache"`    // 新增评分缓存条数
+	Spend    int `json:"spend"`    // 新增 API 用量记录数
+}
+
+// ImportFromDB 把外部数据库（本软件导出的 snaprank.db 或备份）合并进当前库。
+// 合并口径：会话按 ID、照片按（会话+源路径）去重，评分历史经 ID 重映射追加
+// （同照片同模型同版本去重），评分缓存按指纹+模型+版本合并，喜欢标记按指纹合并；
+// 本机已有的记录一律保留不覆盖。全程单事务，任一步失败整体回滚。
+func (s *Store) ImportFromDB(srcPath string) (*ImportResult, error) {
+	if _, err := os.Stat(srcPath); err != nil {
+		return nil, fmt.Errorf("导入文件不可读: %w", err)
+	}
+	if err := s.exec(`ATTACH DATABASE ? AS up`, srcPath); err != nil {
+		return nil, fmt.Errorf("打开导入文件失败（可能不是本软件导出的数据库）: %w", err)
+	}
+	defer s.exec(`DETACH DATABASE up`)
+
+	res := &ImportResult{}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	type step struct {
+		sql  string
+		dest *int
+	}
+	steps := []step{
+		{`INSERT OR IGNORE INTO sessions(id, name, created_at, source_dir, model, prompt_version, status, total, done)
+			SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done FROM up.sessions`, &res.Sessions},
+		{`INSERT INTO photos(session_id, fingerprint, src_path, filename, rel_path, size, status, error, score,
+			dims, tags, strength, weakness, model, prompt_version, clamped, source, override_bucket, archived_path,
+			compressed_path, duration_ms, updated_at)
+			SELECT p.session_id, p.fingerprint, p.src_path, p.filename, p.rel_path, p.size, p.status, p.error, p.score,
+			p.dims, p.tags, p.strength, p.weakness, p.model, p.prompt_version, p.clamped, p.source, p.override_bucket, p.archived_path,
+			p.compressed_path, p.duration_ms, p.updated_at
+			FROM up.photos p
+			WHERE NOT EXISTS (SELECT 1 FROM photos a WHERE a.session_id = p.session_id AND a.src_path = p.src_path)`, &res.Photos},
+		{`INSERT INTO photo_scores(photo_id, model, prompt_version, score, dims, tags, strength, weakness, source, created_at)
+			SELECT a.id, s.model, s.prompt_version, s.score, s.dims, s.tags, s.strength, s.weakness, s.source, s.created_at
+			FROM up.photo_scores s
+			JOIN up.photos p ON p.id = s.photo_id
+			JOIN photos a ON a.session_id = p.session_id AND a.src_path = p.src_path
+			WHERE NOT EXISTS (SELECT 1 FROM photo_scores x WHERE x.photo_id = a.id AND x.model = s.model AND x.prompt_version = s.prompt_version)`, &res.Scores},
+		{`INSERT OR IGNORE INTO score_cache(fingerprint, model, prompt_version, dims, tags, strength, weakness, created_at)
+			SELECT fingerprint, model, prompt_version, dims, tags, strength, weakness, created_at FROM up.score_cache`, &res.Cache},
+		{`INSERT INTO spend_log(day, model, photos, est_cost)
+			SELECT day, model, photos, est_cost FROM up.spend_log`, &res.Spend},
+	}
+	// 喜欢标记表较新，旧备份可能没有：存在才合并
+	if s.upHasTable("photo_favorites") {
+		steps = append(steps, step{`INSERT OR IGNORE INTO photo_favorites(fingerprint, created_at)
+			SELECT fingerprint, created_at FROM up.photo_favorites`, nil})
+	}
+	for _, st := range steps {
+		r, err := tx.Exec(st.sql)
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("导入失败（已回滚，库未改动）: %w", err)
+		}
+		if st.dest != nil {
+			n, _ := r.RowsAffected()
+			*st.dest = int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// exec 执行单条无结果语句（ATTACH/DETACH 用）
+func (s *Store) exec(sql string, args ...interface{}) error {
+	_, err := s.db.Exec(sql, args...)
+	return err
+}
+
+// upHasTable 判断已 ATTACH 的导入库（up.）里是否存在某表
+func (s *Store) upHasTable(name string) bool {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM up.sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+	return n > 0
+}
+
 // ---------- session ----------
 
 // CreateSession 新建会话
