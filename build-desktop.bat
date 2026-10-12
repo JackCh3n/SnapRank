@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul
 title SnapRank ×ÀÃæ¿Ç¹¹½¨
 cd /d "%~dp0"
 
