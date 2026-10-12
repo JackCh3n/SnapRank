@@ -112,6 +112,8 @@
             <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
             <button class="btn danger small" @click="doStop">■ 停止</button>
           </template>
+          <!-- 空闲但还有待评分 = 被停止/夜间安全阀中止，不能显示「已评完」 -->
+          <span v-else-if="waitingCount > 0" class="tag" style="background: #3a2c12; color: #ffa300">■ 已停止 · 剩 {{ waitingCount }} 张待评分（下次开始时继续）</span>
           <span v-else-if="state.tally.done || state.tally.fail" class="tag">✓ 本轮已评完</span>
         </span>
       </div>
@@ -124,7 +126,7 @@
       <div v-for="q in queuedDirs" :key="q.sid" class="row" style="align-items: center; gap: 8px; margin-bottom: 4px">
         <span class="tag">⏳ 排队</span>
         <span class="muted" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="q.dir">{{ q.label }}</span>
-        <span class="muted">等待当前评分完成后自动开始</span>
+        <span class="muted">{{ q.waiting ? `${q.waiting} 张待评分，` : '' }}等待当前评分完成后自动开始</span>
         <button class="btn plain small danger-text" @click="removeQueued(q.sid)">🗑 移除</button>
       </div>
 
@@ -279,11 +281,16 @@ const compressDone = computed(() => (cur.value ? cur.value.compN : 0))
 const scoreDone = computed(() => (cur.value ? cur.value.finalN : 0))
 const doneCount = computed(() => (stage.value === 'compress' ? compressDone.value : scoreDone.value))
 
-// 队列视图：待评分 = 当前未评完 + 各排队目录的未评完（入队/刷新时登记总数）
+// 队列视图：待评分 = 当前未评完 + 各排队目录的未评完（入队/刷新时登记总数）；
+// 空闲时若最近一次是「停止」，被停任务的剩余也计入（标签据此显示已停止而非已评完）
 const waitingCount = computed(() => {
   let n = 0
   for (const sid of [state.queue.current, ...state.queue.queued]) {
     const t = state.tasks[sid]
+    if (t && t.total) n += Math.max(0, t.total - (t.finalN || 0))
+  }
+  if (!state.running && state.lastDone && state.lastDone.stopped) {
+    const t = state.tasks[state.lastDone.session]
     if (t && t.total) n += Math.max(0, t.total - (t.finalN || 0))
   }
   return n
@@ -291,7 +298,7 @@ const waitingCount = computed(() => {
 const queuedDirs = computed(() => state.queue.queued.map((sid) => {
   const t = state.tasks[sid] || {}
   const dir = t.dir || ''
-  return { sid, dir, label: dir ? shortDirLabel(dir) : '待评分目录' }
+  return { sid, dir, label: dir ? shortDirLabel(dir) : '待评分目录', waiting: t.total ? Math.max(0, t.total - (t.finalN || 0)) : 0 }
 }))
 function shortDirLabel(d) {
   const parts = String(d).split(/[\\/]/).filter(Boolean)

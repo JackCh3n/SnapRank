@@ -25,6 +25,7 @@ export const state = reactive({
   retryFiles: new Set(),       // 自动重试标记：`session|文件名`（失败后重新排队的图片）
   scoreFeed: [],               // 最近评完的 10 条（跨任务滚动，仅作展示）
   tally: { done: 0, fail: 0 }, // 本页面会话累计：已评完 / 失败张数
+  lastDone: null,              // 最近一次完成事件 {stopped, session}：停止后剩余张数展示用
   toast: null,
 })
 
@@ -213,6 +214,7 @@ export function connectSSE() {
     const d = JSON.parse(e.data)
     const t = taskOf(d.session_id)
     if (t) { t.finished = true; t.stopped = !!d.stopped }
+    state.lastDone = { stopped: !!d.stopped, session: d.session_id }
     refreshState()
     if (d.stopped) {
       toast('已停止：未评完的图片下次开始时自动继续')
