@@ -193,7 +193,7 @@ export function connectSSE() {
   es.addEventListener('done', (e) => {
     const d = JSON.parse(e.data)
     const t = taskOf(d.session_id)
-    if (t) t.finished = true
+    if (t) { t.finished = true; t.stopped = !!d.stopped }
     refreshState()
     if (d.stopped) {
       toast(`任务 ${d.session_id} 已停止`)

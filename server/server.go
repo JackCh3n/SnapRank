@@ -744,10 +744,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case ev := <-ch:
+			// done 不关闭连接：多任务队列下每个任务都会发 done，
+			// 关闭会迫使浏览器重连，重连间隙里下一个任务的事件会整批丢失
 			writeSSE(w, fl, ev)
-			if ev.Type == "done" {
-				return
-			}
 		case <-heartbeat.C:
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return

@@ -252,7 +252,7 @@ func Load(dataDir string) (*Config, error) {
 		return nil, err
 	}
 	cfg.Paths.DataDir = dataDir
-	cfg.normalize()
+	cfg.Normalize()
 	return cfg, nil
 }
 
@@ -282,8 +282,9 @@ func (c *Config) Save() error {
 	return os.WriteFile(Path(c.Paths.DataDir), data, 0o600)
 }
 
-// normalize 兜底非法取值
-func (c *Config) normalize() {
+// Normalize 兜底非法取值（导出供保存路径调用：设置页保存时同样要钳制，
+// 否则并发>30 等越界值会落盘并在运行中直接生效，重启后才被纠正）
+func (c *Config) Normalize() {
 	d := Default()
 	if c.Provider.Type == "" {
 		c.Provider.Type = d.Provider.Type

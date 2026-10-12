@@ -128,6 +128,7 @@ func (c *Core) SaveConfig(req SaveConfigRequest) (*config.Config, error) {
 	if req.Paths != nil {
 		cfg.Paths = *req.Paths
 	}
+	cfg.Normalize() // 保存前钳制越界值（并发上限等），与启动加载口径一致
 	err := cfg.Save()
 	c.cfgMu.Unlock()
 	if err != nil {

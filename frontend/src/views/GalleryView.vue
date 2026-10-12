@@ -186,6 +186,8 @@ function applyFilters() {
 }
 // 「只看已选」模式下取消勾选时视图实时跟随（size 不变时不触发，天然防循环）
 watch(() => selected.value.size, () => { if (onlySelected.value) applyFilters() })
+// 挂在图库页时任务在别处跑完 → 自动重载，否则新照片要切一次页面才出现
+watch(() => state.running, (v, old) => { if (old && !v) load() })
 
 const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).length)
 const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))

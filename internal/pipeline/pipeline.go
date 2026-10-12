@@ -766,15 +766,19 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	if cfg.Score.ReuseScores {
 		var remaining []*store.Photo
 		for _, p := range queue {
-			if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
-				score := scorer.WeightedScore(ent.Dims, cfg.WeightsNormalized())
-				e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
-				// 压缩图若在共享缓存中存在则登记（老批次可能没有）
-				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				if _, serr := os.Stat(cp); serr == nil {
-					e.store.SetPhotoCompressed(p.ID, cp)
-				}
-				e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
+		if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
+			score := scorer.WeightedScore(ent.Dims, cfg.WeightsNormalized())
+			// 压缩图若在共享缓存中存在则登记（老批次可能没有）。
+			// 必须先登记再写评分结果：SetPhotoCompressed 会把状态置为 compressed，
+			// 顺序颠倒会把已评分状态覆盖掉，导致归档/统计/图库全部漏掉这张
+			cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
+			if _, serr := os.Stat(cp); serr == nil {
+				e.store.SetPhotoCompressed(p.ID, cp)
+			}
+			e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
+			// 与 scoreOne 的缓存命中路径保持一致：命中也计入多模型评分历史
+			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, "cache")
+			e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
 				cacheHits++
 				continue
 			}
@@ -806,7 +810,9 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	}
 
 	// ---------- 阶段二：评分（仅压缩成功的照片） ----------
-	if len(queue) > 0 {
+	// 全缓存命中的批次 queue 为空但仍有进度分母，stage 事件不能漏发，
+	// 否则前端任务卡片标题永远停在「准备中…」
+	if totalAll > 0 {
 		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "score", Total: totalAll}})
 	}
 	var scoreQueue []*store.Photo

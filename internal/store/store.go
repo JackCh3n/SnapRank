@@ -185,6 +185,12 @@ CREATE TABLE IF NOT EXISTS spend_log (
 	if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil {
 		// 列已存在，忽略
 	}
+	// 数据修复：缓存命中链路曾把已评分照片的状态覆盖成 compressed（分数/维度仍在），
+	// 这类照片会被归档、统计与图库漏掉；按「compressed 但已有评分结果」的特征纠正回 scored。
+	// 正常待评分的 compressed 照片 score=0 且 dims 为空，不会被误伤；修复幂等可重复执行
+	if _, rerr := s.db.Exec(`UPDATE photos SET status='scored' WHERE status='compressed' AND score > 0 AND dims IS NOT NULL`); rerr != nil {
+		return rerr
+	}
 	return err
 }
 

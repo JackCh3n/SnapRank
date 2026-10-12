@@ -121,7 +121,7 @@
               <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
               <button class="btn danger small" @click="doStop">■ 停止</button>
             </span>
-            <span v-else-if="task.finished" class="tag">✓ 已完成</span>
+            <span v-else-if="task.finished" class="tag">{{ task.stopped ? '■ 已停止' : '✓ 已完成' }}</span>
           </h3>
           <div class="muted feed-stats" v-if="feedStats" style="margin: 2px 0 6px">
             ✅ 成功 {{ feedStats.ok }} · <span :class="{ 'error-text': feedStats.fail > 0 }">❌ 失败{{ task.autoRetry ? '待重试' : '' }} {{ feedStats.fail }}</span> · ⏳ 待评分 {{ feedStats.comp }}<template v-if="total"> · 📷 剩余 {{ remainCount }}</template>
@@ -240,6 +240,7 @@ function taskLabel(sid) {
   let st = ''
   if (sid === state.queue.current) st = state.queue.paused ? '⏸ 已暂停' : '▶ 运行中'
   else if (state.queue.queued.includes(sid)) st = '⏳ 排队中'
+  else if (t.stopped) st = '■ 已停止'
   else if (t.finished) st = '✓ 已完成'
   return (st ? st + ' ' : '') + sid
 }
