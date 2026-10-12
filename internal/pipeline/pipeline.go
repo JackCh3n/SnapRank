@@ -125,6 +125,7 @@ type StartOpts struct {
 	ForceNew bool     `json:"force_new"` // 强制新建会话（不续跑）
 	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
 	Night    bool     `json:"night"`     // 夜间评分模式：失败照片轮末重新入队，循环重试直到全部成功
+	Models   []string `json:"models"`    // 多模型对比：≥2 个模型并行评同一张；首个为主模型（入正记录），其余进评分历史
 }
 
 // queuedTask 排队中的任务
@@ -292,6 +293,23 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	if model == "" {
 		model = strings.TrimSpace(cfg.Model.Default)
 	}
+	// 多模型对比：去重保序，主模型（首个）决定照片正记录，其余只进评分历史
+	if len(opts.Models) > 1 {
+		seen := map[string]bool{}
+		models := make([]string, 0, len(opts.Models))
+		for _, m := range opts.Models {
+			if m = strings.TrimSpace(m); m != "" && !seen[m] {
+				seen[m] = true
+				models = append(models, m)
+			}
+		}
+		if len(models) < 2 {
+			opts.Models = nil
+		} else {
+			opts.Models = models
+			model = models[0]
+		}
+	}
 	if model == "" && len(cfg.Model.VisionPatterns) > 0 {
 		// 配置默认模型为空：从 Provider 拉取首个可用模型兜底由 UI 层处理；
 		// 此处直接报错避免空模型导致评分卡死
@@ -391,7 +409,52 @@ func (e *Engine) enqueue(sessID string, opts StartOpts, model string) {
 	e.publishQueue()
 	if !busy {
 		e.popAndRun()
+		return
 	}
+	// 排队任务后台预压缩：当前任务评分阶段（等 API、CPU 空闲）时把下一个目录的
+	// 压缩缓存先备好，轮到它时压缩全命中、直接进入评分
+	go e.preCompress(sessID)
+}
+
+// preCompress 后台预压缩排队任务的待处理照片（只落压缩缓存，不动数据库状态）。
+// 任务开跑（自己的压缩池接管）或被移出队列时退出；ToCache 幂等且并发安全，重叠无害。
+func (e *Engine) preCompress(sessID string) {
+	cfg := e.cfgFn()
+	eng, err := compress.NewEngine(cfg.Paths.LibDir, cfg.Pipeline.MaxEdge, cfg.Pipeline.JPEGQuality)
+	if err != nil {
+		return
+	}
+	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", "compressed")
+	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20, "", "", "", "", -1, -1)
+	if err != nil {
+		return
+	}
+	n := 0
+	for _, p := range photos {
+		if (e.running.Load() && e.CurrentSession() == sessID) || !e.inQueue(sessID) {
+			break
+		}
+		if p.Status != store.StatusPending && p.Status != store.StatusCompressed {
+			continue
+		}
+		if _, err := eng.ToCache(p.SrcPath, p.Fingerprint, cacheDir); err == nil {
+			n++
+		}
+	}
+	if n > 0 {
+		logutil.Info("预压缩完成：%s %d 张（轮到评分时直接开始）", sessID, n)
+	}
+}
+
+func (e *Engine) inQueue(sessID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, t := range e.queued {
+		if t.sessID == sessID {
+			return true
+		}
+	}
+	return false
 }
 
 // popAndRun 取出下一个排队任务执行（顺序执行，同时只跑一个）
@@ -769,7 +832,8 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	// （追加照片到同一目录再评分时，老照片不会重新压缩）
 	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", "compressed")
 	cacheHits := 0
-	if cfg.Score.ReuseScores {
+	multiModel := len(opts.Models) > 1
+	if cfg.Score.ReuseScores && !multiModel { // 多模型对比走池内逐模型缓存，不走单模型捷径
 		var remaining []*store.Photo
 		for _, p := range queue {
 		if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
@@ -823,47 +887,60 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	if len(compressQueue) == 0 && totalAll > 0 {
 		publishScoreStage()
 	}
-	return e.streamPools(ctx, eng, prov, model, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+	models := []string{model}
+	if len(opts.Models) > 1 {
+		models = opts.Models
+	}
+	return e.streamPools(ctx, eng, prov, models, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
 }
 
 // streamPools 压缩池与评分池流水并行：压缩成功一张投喂一张（通道缓冲承担背压），
 // 评分池来一张评一张。返回是否被停止。
 // 暂停语义：评分 worker 与压缩投料口都在「跑完当前这张后」挂起；
 // 停止语义：ctx 取消后各环节经 select 逃逸，未评分照片留在原状态供续跑。
-func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov provider.Provider, model string,
+func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov provider.Provider, models []string,
 	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
 
-	sc := e.cfgFn().Pipeline.ScoreConcurrency
-	cc := e.cfgFn().Pipeline.CompressConcurrency
-	scoreJobs := make(chan *store.Photo, sc) // 缓冲=评分并发：压缩池短暂超前不阻塞
-	compressJobs := make(chan *store.Photo)
+	// 动态并发：worker 数每秒对齐配置（设置页/运行页调整保存后 1 秒内生效；
+	// 调小则多余 worker 跑完当前这张后退出）
+	scDesired := atomic.Int64{}
+	ccDesired := atomic.Int64{}
+	scoreJobs := make(chan *store.Photo, 64)   // 缓冲：压缩池短暂超前不阻塞
+	compressJobs := make(chan *store.Photo)    // 无缓冲：投料节奏跟随 worker，动态扩容窗口覆盖整个压缩阶段
 	doneCount := atomic.Int64{}
 	var stopFlag atomic.Bool
+	var scoreWG, compressWG sync.WaitGroup
+	var scoreN, compressN atomic.Int64
 
-	// 评分池：waitIfPaused 同时承担取消判断（取消时返回 false）
-	var scoreWG sync.WaitGroup
-	for i := 0; i < sc; i++ {
+	// 评分池 worker：waitIfPaused 同时承担取消判断（取消时返回 false）
+	spawnScore := func() {
+		scoreN.Add(1)
 		scoreWG.Add(1)
 		go func() {
 			defer scoreWG.Done()
+			defer scoreN.Add(-1)
 			for p := range scoreJobs {
 				if !e.waitIfPaused(ctx) {
 					stopFlag.Store(true)
 					continue
 				}
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				prog := e.scoreOne(ctx, prov, model, p, cp, totalAll, &doneCount)
+				prog := e.scoreOneMulti(ctx, prov, models, p, cp, totalAll, &doneCount)
 				e.Bus.Publish(Event{Type: "progress", Data: prog})
+				if scoreN.Load() > scDesired.Load() {
+					return // 并发被调小：处理完当前这张再退出（不丢照片）
+				}
 			}
 		}()
 	}
 
-	// 压缩池：压完一张喂一张（失败标 bad_image，不进评分）
-	var compressWG sync.WaitGroup
-	for i := 0; i < cc; i++ {
+	// 压缩池 worker：压完一张喂一张（失败标 bad_image，不进评分）
+	spawnCompress := func() {
+		compressN.Add(1)
 		compressWG.Add(1)
 		go func() {
 			defer compressWG.Done()
+			defer compressN.Add(-1)
 			for p := range compressJobs {
 				if ctx.Err() != nil {
 					stopFlag.Store(true)
@@ -884,9 +961,56 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov pro
 				case <-ctx.Done():
 					stopFlag.Store(true)
 				}
+				if compressN.Load() > ccDesired.Load() {
+					return // 并发被调小：处理完当前这张再退出
+				}
 			}
 		}()
 	}
+
+	// 动态并发：worker 数每秒对齐配置（运行中可调）。
+	// 初始起满在主流程同步执行（避免与收尾 close 抢锁导致 worker 从未启动）；
+	// poolMu 保证 spawn 与收尾 close 互斥，close 前置 closed 标志后不再扩容，
+	// 杜绝 WaitGroup 的 Add 与 Wait 并发（panic）。评分池的动态窗口保持到评分排干。
+	var poolMu sync.Mutex
+	var compressClosed, scoreClosed bool
+	adjust := func() {
+		poolMu.Lock()
+		defer poolMu.Unlock()
+		sc := int64(e.cfgFn().Pipeline.ScoreConcurrency)
+		cc := int64(e.cfgFn().Pipeline.CompressConcurrency)
+		if sc != scDesired.Load() || cc != ccDesired.Load() || scoreN.Load() == 0 || compressN.Load() == 0 {
+			logutil.Info("[并发] 期望 评分=%d 压缩=%d，实际 评分=%d 压缩=%d", sc, cc, scoreN.Load(), compressN.Load())
+		}
+		scDesired.Store(sc)
+		ccDesired.Store(cc)
+		if !scoreClosed {
+			for scoreN.Load() < scDesired.Load() {
+				spawnScore()
+			}
+		}
+		if !compressClosed {
+			for compressN.Load() < ccDesired.Load() {
+				spawnCompress()
+			}
+		}
+	}
+	adjust() // 主流程同步起满（先于投料与收尾）
+	supQuit := make(chan struct{})
+	supDone := make(chan struct{})
+	go func() {
+		defer close(supDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-supQuit:
+				return
+			case <-time.After(time.Second):
+				adjust()
+			}
+		}
+	}()
 
 	// 投料：压缩队列逐张派发给压缩池（暂停时挂起派发）
 producer:
@@ -902,10 +1026,20 @@ producer:
 		case compressJobs <- p:
 		}
 	}
+	// 收尾：先冻结压缩池扩容并关压缩通道（评分池仍可动态调整），
+	// 压缩排干后再冻结评分池并关评分通道，最后停 supervisor
+	poolMu.Lock()
+	compressClosed = true
 	close(compressJobs)
+	poolMu.Unlock()
 	compressWG.Wait()
+	poolMu.Lock()
+	scoreClosed = true
 	close(scoreJobs)
+	poolMu.Unlock()
 	scoreWG.Wait()
+	close(supQuit)
+	<-supDone
 	return stopFlag.Load() && ctx.Err() != nil
 }
 
@@ -918,29 +1052,75 @@ func isFinalStatus(s string) bool {
 	return false
 }
 
-// scoreOne 评分单张（含跨会话缓存命中与重试退避）
-func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
-	cfg := e.cfgFn()
-	start := time.Now()
+// modelOutcome 单模型评分结果（scoreModel 返回）
+type modelOutcome struct {
+	dims      *store.Dims
+	tags      []string
+	strength  string
+	weakness  string
+	status    string // scored | parse_fail | failed | bad_image
+	errDetail string
+	cached    bool
+	clamped   bool
+}
 
+// scoreOneMulti 评分单张：单模型走原路径；多模型（≥2）并行评同一张，
+// 主模型（首个）结果入照片正记录，全部模型各自写评分缓存与历史（弹窗可对比）
+func (e *Engine) scoreOneMulti(ctx context.Context, prov provider.Provider, models []string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
+	if len(models) <= 1 {
+		return e.scoreOne(ctx, prov, models[0], p, compressedPath, total, doneCount)
+	}
+	start := time.Now()
+	outcomes := make([]modelOutcome, len(models))
+	var wg sync.WaitGroup
+	for i, m := range models {
+		wg.Add(1)
+		go func(i int, m string) {
+			defer wg.Done()
+			outcomes[i] = e.scoreModel(ctx, prov, m, p, compressedPath)
+		}(i, m)
+	}
+	wg.Wait()
+	idx := doneCount.Add(1)
+	primary := outcomes[0]
+	cfg := e.cfgFn()
+	switch primary.status {
+	case store.StatusScored:
+		score := scorer.WeightedScore(*primary.dims, cfg.WeightsNormalized())
+		src := "api"
+		if primary.cached {
+			src = "cache"
+		}
+		e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, models[0], scorer.PromptVersion, src, primary.clamped, time.Since(start).Milliseconds())
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}
+	case store.StatusParseFail:
+		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", models[0], scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
+		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(primary.errDetail, 500))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(primary.errDetail, 200)}
+	case store.StatusBadImage:
+		e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(primary.errDetail, 300))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(primary.errDetail, 120)}
+	default: // failed
+		e.store.SetPhotoStatus(p.ID, store.StatusFailed, truncate(primary.errDetail, 300))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(primary.errDetail, 120)}
+	}
+}
+
+// scoreModel 用单个模型评一张（缓存优先，含重试退避）；
+// 成功时写评分缓存与多模型历史，不写照片正记录（由调用方决定主模型结果）
+func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model string, p *store.Photo, compressedPath string) modelOutcome {
+	cfg := e.cfgFn()
 	// 跨会话缓存命中（0 计费）
 	if cfg.Score.ReuseScores {
 		if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
-			score := scorer.WeightedScore(ent.Dims, cfg.WeightsNormalized())
-			e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
-			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, "cache")
-			idx := doneCount.Add(1)
-			return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}
+			d := ent.Dims
+			return modelOutcome{dims: &d, tags: ent.Tags, strength: ent.Strength, weakness: ent.Weakness, status: store.StatusScored, cached: true}
 		}
 	}
-
 	b64, err := readB64(compressedPath)
 	if err != nil {
-		e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
-		idx := doneCount.Add(1)
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}
+		return modelOutcome{status: store.StatusBadImage, errDetail: truncate(err.Error(), 300)}
 	}
-
 	req := provider.ScoreRequest{
 		ImageB64:  b64,
 		Filename:  p.Filename,
@@ -950,7 +1130,6 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		Timeout:   time.Duration(cfg.Score.TimeoutSec) * time.Second,
 		Effort:    cfg.Score.ReasoningEffort,
 	}
-
 	var content string
 	attempts := 0
 	for {
@@ -971,15 +1150,12 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		case <-time.After(backoff):
 		}
 	}
-	idx := doneCount.Add(1)
 	if err != nil {
 		if errors.Is(err, provider.ErrModelNoVision) {
 			err = fmt.Errorf("%w（请在模型下拉更换视觉模型）", err)
 		}
-		e.store.SetPhotoStatus(p.ID, store.StatusFailed, truncate(err.Error(), 300))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(err.Error(), 120)}
+		return modelOutcome{status: store.StatusFailed, errDetail: truncate(err.Error(), 300)}
 	}
-
 	dims, tags, strength, weakness, clamped, perr := scorer.Parse(content)
 	if perr != nil {
 		// 解析失败不伪造分数：标记待复检，并把模型原始输出片段存入 error 便于排查
@@ -987,17 +1163,42 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		if strings.TrimSpace(content) == "" {
 			frag = "（模型返回了空内容——可能是安全拦截、max_tokens 截断或平台异常，可更换模型重试）"
 		}
-		detail := fmt.Sprintf("%s ｜ 模型输出片段: %s", perr.Error(), frag)
-		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", model, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
-		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(detail, 500))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(detail, 200)}
+		return modelOutcome{status: store.StatusParseFail, errDetail: truncate(fmt.Sprintf("%s ｜ 模型输出片段: %s", perr.Error(), frag), 500)}
 	}
-	score := scorer.WeightedScore(dims, cfg.WeightsNormalized())
-	e.store.SetPhotoResult(p.ID, store.StatusScored, score, &dims, tags, strength, weakness, model, scorer.PromptVersion, "api", clamped, time.Since(start).Milliseconds())
+	// 成功：写评分缓存 + 多模型历史（每次 API 评分追加一条，切换模型可对比）
 	e.store.CachePut(p.Fingerprint, model, scorer.PromptVersion, dims, tags, strength, weakness)
-	// 多模型评分历史：每次 API 评分追加一条（切换模型可对比）
+	score := scorer.WeightedScore(dims, cfg.WeightsNormalized())
 	e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &dims, tags, strength, weakness, "api")
-	return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored}
+	return modelOutcome{dims: &dims, tags: tags, strength: strength, weakness: weakness, status: store.StatusScored, clamped: clamped}
+}
+
+// scoreOne 评分单张（含跨会话缓存命中与重试退避）
+func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
+	cfg := e.cfgFn()
+	start := time.Now()
+	o := e.scoreModel(ctx, prov, model, p, compressedPath)
+	idx := doneCount.Add(1)
+	switch o.status {
+	case store.StatusScored:
+		score := scorer.WeightedScore(*o.dims, cfg.WeightsNormalized())
+		src := "api"
+		if o.cached {
+			src = "cache"
+			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, o.dims, o.tags, o.strength, o.weakness, "cache")
+		}
+		e.store.SetPhotoResult(p.ID, store.StatusScored, score, o.dims, o.tags, o.strength, o.weakness, model, scorer.PromptVersion, src, o.clamped, time.Since(start).Milliseconds())
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: o.cached}
+	case store.StatusParseFail:
+		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", model, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
+		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(o.errDetail, 500))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(o.errDetail, 200)}
+	case store.StatusBadImage:
+		e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(o.errDetail, 300))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(o.errDetail, 120)}
+	default: // failed
+		e.store.SetPhotoStatus(p.ID, store.StatusFailed, truncate(o.errDetail, 300))
+		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(o.errDetail, 120)}
+	}
 }
 
 // summarizeContent 压缩模型原始输出为单行片段（去换行/代码块标记），用于失败详情展示

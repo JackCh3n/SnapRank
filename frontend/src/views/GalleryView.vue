@@ -14,7 +14,22 @@
           </label>
           <label class="field">
             搜索文件名
-            <input v-model="search" style="width: 180px" @input="applyFilters" placeholder="留空=全部" />
+            <input v-model="search" style="width: 160px" @input="applyFilters" placeholder="留空=全部" />
+          </label>
+          <label class="field">
+            排序
+            <select v-model="sortBy" @change="applyFilters" style="width: 110px">
+              <option value="score-desc">分数 ↓</option>
+              <option value="score-asc">分数 ↑</option>
+              <option value="name-asc">文件名 ↑</option>
+              <option value="name-desc">文件名 ↓</option>
+            </select>
+          </label>
+          <label class="field row" style="flex-direction: row; align-items: center; gap: 4px" title="按分数区间筛选（只作用于已评分照片；两个都填同一值即精确匹配）">
+            分数
+            <input v-model.number="scoreMin" type="number" min="0" max="10" step="0.1" style="width: 56px; text-align: center" placeholder="低" @change="applyFilters" />
+            ~
+            <input v-model.number="scoreMax" type="number" min="0" max="10" step="0.1" style="width: 56px; text-align: center" placeholder="高" @change="applyFilters" />
           </label>
           <label class="field row" style="flex-direction: row; align-items: center; gap: 6px">
             <input v-model="onlySelected" type="checkbox" @change="applyFilters" /> 只看已选（{{ selected.size }}）
@@ -37,6 +52,8 @@
           </span>
           <button class="btn small" :disabled="!rescorableCount || rescoring" title="忽略缓存，用当前所选模型重新调用 AI 评分"
             @click="rescoreSelected">↻ 重评所选（{{ rescorableCount }}）</button>
+          <button class="btn small" :disabled="rescoring" title="选择新模型批量重评：当前筛选/无说明/已选"
+            @click="openRescoreAll">↻ 一键重评…</button>
           <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
             🗑️ 删除所选（{{ selected.size }}）
           </button>
@@ -128,6 +145,37 @@
     <PhotoModal v-if="preview" :photo="preview" :busy="false" :list="filtered"
       @close="preview = null" @navigate="onNavigate" @deleted="onDeleted" />
 
+    <!-- 一键重评弹窗：选范围 + 新模型 -->
+    <div v-if="rescoreAllOpen" class="cf-mask" @click.self="rescoreAllOpen = false">
+      <div class="cf-card" style="border-color: var(--accent)">
+        <h3 class="title">↻ 一键重新评分</h3>
+        <div class="row" style="flex-direction: column; align-items: stretch; gap: 10px; margin-top: 6px">
+          <label class="field">
+            重评范围
+            <select v-model="rescoreScope">
+              <option value="filtered">当前筛选结果（{{ scopeCount('filtered') }} 张）</option>
+              <option value="noReason">无说明的照片（{{ scopeCount('noReason') }} 张）</option>
+              <option value="selected">已勾选（{{ scopeCount('selected') }} 张）</option>
+            </select>
+          </label>
+          <label class="field">
+            评分模型（可换新模型，历史保留每次记录可对比）
+            <select v-model="rescoreModel">
+              <option v-for="m in state.models.vision" :key="m" :value="m">{{ m }}</option>
+              <option v-if="state.currentModel && !state.models.vision.includes(state.currentModel)" :value="state.currentModel">{{ state.currentModel }}（当前）</option>
+            </select>
+          </label>
+          <div class="muted">忽略缓存强制重新调用 AI（产生 API 费用）；换新模型可对比不同 AI 的评分差异</div>
+        </div>
+        <div class="row" style="justify-content: flex-end; margin-top: 12px">
+          <button class="btn plain" @click="rescoreAllOpen = false">取消</button>
+          <button class="btn" :disabled="rescoring || !scopeCount(rescoreScope)" @click="doRescoreAll">
+            开始重评（{{ scopeCount(rescoreScope) }} 张）
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 删除二次预览确认 -->
     <div v-if="confirmOpen" class="cf-mask" @click.self="confirmOpen = false">
       <div class="cf-card">
@@ -181,6 +229,9 @@ const deleteRaw = ref(true)
 const delResult = ref(null)
 const lowThreshold = ref(5)
 const noReason = ref(false) // 无说明筛选：已评分但没有「不足」文字的照片
+const sortBy = ref('score-desc') // 排序：分数/文件名双向
+const scoreMin = ref('') // 分数区间筛选（空=不限）
+const scoreMax = ref('')
 const recycleDelete = ref(true) // 删除→回收站（配置持久化，见 saveRecycleOpt）
 const page = ref(1)
 // 每页条数（localStorage 持久化；改完回第 1 页）
@@ -251,8 +302,25 @@ function applyFilters(resetPage = true) {
     list = list.filter((p) => p.filename.toLowerCase().includes(q))
   }
   if (noReason.value) list = list.filter((p) => p.status === 'scored' && !p.weakness)
+  // 分数区间：只作用于已评分照片（填了任一端即排除未评分）
+  if (scoreMin.value !== '' || scoreMax.value !== '') {
+    list = list.filter((p) => {
+      if (p.status !== 'scored') return false
+      if (scoreMin.value !== '' && p.score < +scoreMin.value) return false
+      if (scoreMax.value !== '' && p.score > +scoreMax.value) return false
+      return true
+    })
+  }
   if (onlySelected.value) list = list.filter((p) => selected.value.has(p.id))
-  filtered.value = list
+  // 排序（客户端，作用于全部筛选结果）
+  const sorted = [...list]
+  switch (sortBy.value) {
+    case 'score-asc': sorted.sort((a, b) => a.score - b.score); break
+    case 'name-asc': sorted.sort((a, b) => a.filename.localeCompare(b.filename, 'zh')); break
+    case 'name-desc': sorted.sort((a, b) => b.filename.localeCompare(a.filename, 'zh')); break
+    default: sorted.sort((a, b) => b.score - a.score)
+  }
+  filtered.value = sorted
   if (resetPage) page.value = 1
   else if (page.value > totalPages.value) page.value = totalPages.value
   // 清掉已不在列表中的选择
@@ -332,12 +400,56 @@ function rescorable(p) {
 }
 const rescorableCount = computed(() => items.value.filter((p) => selected.value.has(p.id) && rescorable(p)).length)
 
+// ---------- 一键重评：范围 + 新模型 ----------
+const rescoreAllOpen = ref(false)
+const rescoreScope = ref('filtered')
+const rescoreModel = ref('')
+function rescopeTargets() {
+  let list = filtered.value
+  if (rescoreScope.value === 'noReason') list = items.value.filter((p) => p.status === 'scored' && !p.weakness)
+  else if (rescoreScope.value === 'selected') list = items.value.filter((p) => selected.value.has(p.id))
+  return list.filter(rescorable)
+}
+// 纯函数：按指定范围计数（模板渲染用——绝不能在渲染期间修改响应式状态）
+function scopeCount(scope) {
+  let list = filtered.value
+  if (scope === 'noReason') list = items.value.filter((p) => p.status === 'scored' && !p.weakness)
+  else if (scope === 'selected') list = items.value.filter((p) => selected.value.has(p.id))
+  return list.filter(rescorable).length
+}
+async function openRescoreAll() {
+  // 模型清单可能未加载（图库页不拉取）：打开时补拉
+  if (!state.models.vision.length) {
+    try {
+      const r = await api('/api/models')
+      state.models = r
+    } catch { /* 拉取失败仍可用当前模型 */ }
+  }
+  rescoreModel.value = state.selModel || state.currentModel || (state.models.vision[0] || '')
+  rescoreAllOpen.value = true
+}
+async function doRescoreAll() {
+  const targets = rescopeTargets()
+  if (!targets.length) {
+    toast('所选范围内没有可重评的照片')
+    return
+  }
+  rescoreAllOpen.value = false
+  state.selModel = rescoreModel.value // rescorePhotos 会把它应用为默认模型
+  await startRescore(targets)
+}
+
 async function rescoreSelected() {
   const targets = items.value.filter((p) => selected.value.has(p.id) && rescorable(p))
   if (!targets.length) {
     toast('所选照片中没有可重评的（源文件已删或格式不支持）')
     return
   }
+  await startRescore(targets)
+}
+
+// 提交重评并监听进度（重评所选 / 一键重评共用）
+async function startRescore(targets) {
   rescoring.value = true
   rescoreDone.value = 0
   rescoreFailed.value = 0

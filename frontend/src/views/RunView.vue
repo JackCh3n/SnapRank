@@ -86,7 +86,23 @@
           <input v-model="nightMode" type="checkbox" />
           <span>🔁 失败自动重试</span>
         </label>
-        <span class="muted">失败的图片自动排到队尾重试（间隔 15s），直到全部评分成功——可夜间挂机跑完整目录</span>
+        <label class="field row" style="flex-direction: row; align-items: center; gap: 6px"
+          title="勾选后可加选多个模型，同一张图并行评分对比（主模型结果入正记录，其余进评分历史）">
+          <input v-model="compareMode" type="checkbox" />
+          <span>⚖️ 多模型对比</span>
+        </label>
+        <span class="muted">失败自动重试：排到队尾重试（间隔 15s）直到全部成功；多模型对比：至少 2 个模型同时评同一张</span>
+      </div>
+      <div v-if="compareMode" class="row" style="margin-top: 8px; align-items: flex-start">
+        <label class="field grow">
+          对比模型（Ctrl/Shift 多选，与主模型并行评分）
+          <select v-model="state.compareModels" multiple size="5" title="按住 Ctrl 点选多个">
+            <option v-for="m in state.models.vision.filter(x => x !== state.selModel)" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </label>
+        <span class="muted" style="max-width: 260px">
+          主模型（上方下拉）的结果作为照片的正式分数；每个模型各自写入评分历史，照片弹窗可切换对比。已选 {{ state.compareModels.length }} 个对比模型。
+        </span>
       </div>
       <div class="muted" style="margin-top: 8px">
         当前模型：<b>{{ state.currentModel || '未设置' }}</b>
@@ -107,6 +123,12 @@
         <span class="row" style="gap: 8px; align-items: center">
           <span class="eta" v-if="etaText">{{ etaText }}</span>
           <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
+          <span class="row" style="gap: 3px; align-items: center" title="评分并发：运行中可调，1 秒内生效（调小则多余进程跑完当前张退出）">
+            <button class="btn plain small" style="padding: 2px 8px" :disabled="scoreConc <= 1" @click="bumpConc(-1)">−</button>
+            <b>{{ scoreConc }}</b>
+            <button class="btn plain small" style="padding: 2px 8px" :disabled="scoreConc >= 30" @click="bumpConc(1)">＋</button>
+            并发
+          </span>
           <template v-if="state.running">
             <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
             <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
@@ -237,6 +259,22 @@ async function removeDir(d) {
 // ---------- 评分队列 ----------
 const FINAL = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
 const queueCount = computed(() => state.queue.queued.length)
+
+// 评分并发快捷调整（运行中生效：池每秒对齐配置；调小则多余 worker 跑完当前张退出）
+const scoreConc = computed(() => (state.config && state.config.pipeline && state.config.pipeline.score_concurrency) || 1)
+async function bumpConc(d) {
+  const v = Math.min(30, Math.max(1, scoreConc.value + d))
+  try {
+    const cfg = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ pipeline: { ...state.config.pipeline, score_concurrency: v } }),
+    })
+    state.config = cfg
+    toast(`评分并发已调整为 ${v}（1 秒内生效）`)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 
 // ---------- 评分管理：暂停 / 继续 / 移除排队目录 ----------
 async function pauseTask() {
@@ -373,6 +411,7 @@ const scanning = ref(false)
 const starting = ref(false)
 // 夜间评分模式：失败自动重试直到全部成功（选择记忆到 localStorage）
 const nightMode = ref(localStorage.getItem('sr_night_mode') === '1')
+const compareMode = ref(false) // 多模型对比：主模型 + compareModels 并行评同一张
 watch(nightMode, (v) => localStorage.setItem('sr_night_mode', v ? '1' : '0'))
 const importing = ref(false)
 const importDone = ref(0)
@@ -554,11 +593,21 @@ async function doStart(sample) {
   try {
     // 多目录：逐目录提交，依次进入排队（队列模型天然承接）
     const dirs = parseDirs()
+    // 多模型对比：主模型 + 勾选的对比模型（去重，至少 2 个才启用）
+    let models
+    if (compareMode.value && !sample) {
+      models = [state.selModel, ...state.compareModels.filter((m) => m && m !== state.selModel)]
+      if (models.length < 2) {
+        toast('多模型对比至少需要 2 个模型（主模型 + 1 个对比模型）', true)
+        starting.value = false
+        return
+      }
+    }
     let resumed = 0, queued = 0, first = null
     for (const d of dirs) {
       const r = await api('/api/start', {
         method: 'POST',
-        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
+        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models }),
       })
       const t = taskOf(r.session_id)
       t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
@@ -577,7 +626,7 @@ async function doStart(sample) {
       toast(`${nightTag}继续上次：剩余 ${first.pending} 张待评分${queued ? '，已排队' : ''}`)
     }
     else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(first.session_id)} 个目录）`)
-    else toast(`${nightTag}开始评分（模型 ${first.model}）`)
+    else toast(`${nightTag}开始评分（模型 ${first.model}${models && models.length > 1 ? ` +${models.length - 1} 对比` : ''}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)

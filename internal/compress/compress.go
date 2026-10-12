@@ -5,6 +5,7 @@ package compress
 
 import (
 	"fmt"
+	"time"
 	"image"
 	"image/color"
 	"image/draw"
@@ -93,7 +94,9 @@ func (e *Engine) ToCache(srcPath, fingerprint, cacheDir string) (string, error) 
 		return "", err
 	}
 
-	tmpPath := filepath.Join(cacheDir, ".tmp_"+CacheName(fingerprint))
+	// 临时文件名带随机后缀：预压缩与正式压缩可能并发处理同一指纹，
+	// 重名 tmp 会互相覆盖导致 rename 失败误报 bad_image
+	tmpPath := filepath.Join(cacheDir, fmt.Sprintf(".tmp_%s_%d.jpg", strings.TrimSuffix(CacheName(fingerprint), ".jpg"), time.Now().UnixNano()))
 	defer os.Remove(tmpPath)
 	defer os.Remove(tmpPath + ".tmp") // DD鹅 原地模式的中间产物
 
@@ -123,8 +126,11 @@ func (e *Engine) ToCache(srcPath, fingerprint, cacheDir string) (string, error) 
 		logutil.Info("DD鹅 压缩回退为预处理产物 %s: %v", filepath.Base(srcPath), err)
 	}
 
-	// ③ 落缓存
+	// ③ 落缓存：并发方先完成时本方 rename 失败，视为命中（内容同指纹）
 	if err := os.Rename(tmpPath, dst); err != nil {
+		if st, serr := os.Stat(dst); serr == nil && st.Size() > 0 {
+			return dst, nil
+		}
 		return "", err
 	}
 	return dst, nil

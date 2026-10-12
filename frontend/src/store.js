@@ -18,7 +18,8 @@ export const state = reactive({
   tasks: {},                   // sid -> { progress: [], total: 0, stage: '', startedAt: 0, finished: false }
   scan: null,                  // {count, est_cost, items}
   dir: '',                     // 运行页输入的源图目录（跨页面保留）
-  selModel: '',                // 运行页选中的模型（跨页面保留）
+  selModel: '',                // 运行页选中的主模型（跨页面保留）
+  compareModels: [],           // 多模型对比：除主模型外的对比模型
   formatPreset: '',            // 运行页格式筛选（跨页面保留）
   importDir: '',               // 当前导入任务目录（贴入/拖入统一归类，后续追加）
   forcedFiles: new Set(),      // 强制评分标记：`session|文件名`（重评/复检入队的图片，忽略缓存重调）
