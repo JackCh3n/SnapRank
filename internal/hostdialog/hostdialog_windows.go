@@ -85,14 +85,19 @@ type vtblFileOpenDialog struct {
 	GetSelectedItems uintptr
 }
 
-// IShellItemArray vtable（GetCount=3、GetItemAt=4）
+// IShellItemArray vtable（真实声明顺序：BindToHandler 等四个方法在
+// GetCount/GetItemAt 之前——按 MSDN 字母序会错位，同 IFileDialog 的坑）
 type vtblShellItemArray struct {
-	QueryInterface uintptr
-	AddRef         uintptr
-	Release        uintptr
-	GetCount       uintptr
-	GetItemAt      uintptr
-	EnumItems      uintptr
+	QueryInterface             uintptr // 0
+	AddRef                     uintptr // 1
+	Release                    uintptr // 2
+	BindToHandler              uintptr // 3
+	GetPropertyStore           uintptr // 4
+	GetPropertyDescriptionList uintptr // 5
+	GetAttributes              uintptr // 6
+	GetCount                   uintptr // 7
+	GetItemAt                  uintptr // 8
+	EnumItems                  uintptr // 9
 }
 
 type iFileOpenDialog struct {
@@ -160,14 +165,13 @@ func PickFolders() ([]string, error) {
 	if hr, _, _ := syscall.SyscallN(d.lpVtbl.GetResults, uintptr(unsafe.Pointer(d)), uintptr(unsafe.Pointer(&arr))); hr == 0 && arr != nil {
 		arrVtbl := *(*unsafe.Pointer)(arr)
 		defer syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 2*8)), uintptr(arr)) // Release
+		avt := (*vtblShellItemArray)(arrVtbl)
 		var count uint32
-		if hr, _, _ := syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 3*8)),
-			uintptr(arr), uintptr(unsafe.Pointer(&count))); hr == 0 {
+		if hr, _, _ := syscall.SyscallN(avt.GetCount, uintptr(arr), uintptr(unsafe.Pointer(&count))); hr == 0 {
 			dirs := make([]string, 0, count)
 			for i := uint32(0); i < count; i++ {
 				var item unsafe.Pointer
-				if hr, _, _ := syscall.SyscallN(*(*uintptr)(unsafe.Pointer(uintptr(arrVtbl) + 4*8)),
-					uintptr(arr), uintptr(i), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
+				if hr, _, _ := syscall.SyscallN(avt.GetItemAt, uintptr(arr), uintptr(i), uintptr(unsafe.Pointer(&item))); hr != 0 || item == nil {
 					continue
 				}
 				if p := itemDisplayName(item); p != "" {
