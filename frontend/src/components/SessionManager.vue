@@ -33,6 +33,7 @@
 <script setup>
 import { ref } from 'vue'
 import { api, toast } from '../store.js'
+import { confirmDialog } from '../confirm.js'
 
 const props = defineProps({
   sessions: { type: Array, required: true },
@@ -66,7 +67,7 @@ async function rename(s) {
 
 async function remove(s) {
   const label = s.name || s.id
-  if (!confirm(`删除批次「${label}」？\n将删除该批次的评分明细与压缩缓存（源图与已归档照片不受影响）。\n此操作不可恢复！`)) return
+  if (!(await confirmDialog({ title: '删除批次', message: `删除批次「${label}」？\n将删除该批次的评分明细与压缩缓存（源图与已归档照片不受影响）。\n此操作不可恢复！`, danger: true, confirmText: '删除' }))) return
   busyId.value = s.id
   try {
     const r = await api('/api/session/delete', { method: 'POST', body: JSON.stringify({ id: s.id }) })

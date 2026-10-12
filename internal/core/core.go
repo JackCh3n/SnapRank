@@ -98,6 +98,7 @@ type SaveConfigRequest struct {
 	Pipeline   *config.PipelineConfig `json:"pipeline,omitempty"`
 	Cost       *config.CostConfig     `json:"cost,omitempty"`
 	Paths      *config.PathsConfig    `json:"paths,omitempty"`
+	Gallery    *config.GalleryConfig  `json:"gallery,omitempty"`
 }
 
 // SaveConfig 部分更新并持久化配置
@@ -127,6 +128,9 @@ func (c *Core) SaveConfig(req SaveConfigRequest) (*config.Config, error) {
 	}
 	if req.Paths != nil {
 		cfg.Paths = *req.Paths
+	}
+	if req.Gallery != nil {
+		cfg.Gallery = *req.Gallery
 	}
 	cfg.Normalize() // 保存前钳制越界值（并发上限等），与启动加载口径一致
 	err := cfg.Save()
@@ -549,20 +553,49 @@ func (c *Core) SetImportDir(dir string) error {
 
 // GalleryDeleteResult 批量删除结果
 type GalleryDeleteResult struct {
-	Deleted int      `json:"deleted"`  // 删除的照片源文件数
-	Raws    int      `json:"raws"`     // 联动删除的 RAW/伴生文件数
-	FreedMB float64  `json:"freed_mb"` // 释放空间
-	Missing int      `json:"missing"`  // 源文件已不存在的
-	Errors  []string `json:"errors,omitempty"`
+	Deleted   int      `json:"deleted"`             // 直接删除的照片源文件数
+	Raws      int      `json:"raws"`                // 联动处理的 RAW/伴生文件数
+	FreedMB   float64  `json:"freed_mb"`            // 释放/移出空间
+	Missing   int      `json:"missing"`             // 源文件已不存在的
+	Recycled  int      `json:"recycled"`            // 移入回收站的照片源文件数
+	RecycleDir string  `json:"recycle_dir,omitempty"` // 回收站目录（前端打开用）
+	RemovedRecords int `json:"removed_records"`    // 仅移除记录的照片数
+	Errors    []string `json:"errors,omitempty"`
 }
 
-// GalleryDelete 批量删除照片源文件（可选联动同名 RAW/HEIC 伴生文件），
-// 并移除这些文件在所有批次中的记录。不可恢复，调用方须先经用户确认。
-func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult, error) {
+// GalleryDelete 批量处理所选照片：
+//   - recordsOnly=true：仅删除数据库记录（源文件不动）
+//   - 回收模式（gallery.recycle_on_delete，默认开）：源文件移入
+//     <源图目录>/SnapRank_回收站/，用户可反悔（移回原目录即恢复展示）或手动清空
+//   - 直接模式：删除源文件（不可恢复，调用方须先经用户确认）
+//
+// deleteRaw 联动处理同名 RAW/HEIC 伴生文件。除 recordsOnly 外数据库记录均保留（历史可查）。
+func (c *Core) GalleryDelete(ids []int64, deleteRaw, recordsOnly bool) (*GalleryDeleteResult, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("未选择照片")
 	}
 	res := &GalleryDeleteResult{}
+	if recordsOnly {
+		// 按源路径删全部批次记录：同一文件在多个批次各有记录，
+		// 只删图库展示的那条会被旧记录顶回来
+		paths := make([]string, 0, len(ids))
+		seen := map[string]bool{}
+		for _, id := range ids {
+			p, err := c.st.GetPhoto(id)
+			if err != nil || p == nil || seen[p.SrcPath] {
+				continue
+			}
+			seen[p.SrcPath] = true
+			paths = append(paths, p.SrcPath)
+		}
+		if err := c.st.DeletePhotosBySrcPaths(paths); err != nil {
+			return nil, err
+		}
+		res.RemovedRecords = len(paths)
+		return res, nil
+	}
+	recycle := c.snapshotConfig().Gallery.RecycleOnDelete
+	srcDirs := map[string]string{} // sessionID -> 源图目录（回收站建在这里）
 	for _, id := range ids {
 		p, err := c.st.GetPhoto(id)
 		if err != nil {
@@ -572,14 +605,34 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult,
 		st, statErr := os.Stat(src)
 		if statErr != nil {
 			res.Missing++
-		} else {
-			res.FreedMB += float64(st.Size()) / 1048576
-			if err := os.Remove(src); err != nil {
-				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.Filename, err))
+			continue
+		}
+		res.FreedMB += float64(st.Size()) / 1048576
+		if recycle {
+			dir, ok := srcDirs[p.SessionID]
+			if !ok {
+				dir = filepath.Dir(src) // 找不到批次记录时退回照片所在目录
+				if sess, serr := c.st.GetSession(p.SessionID); serr == nil && sess.SourceDir != "" {
+					dir = sess.SourceDir
+				}
+				srcDirs[p.SessionID] = dir
+			}
+			if _, merr := moveToRecycle(src, dir); merr != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.Filename, merr))
 				continue
 			}
-			res.Deleted++
+			res.Recycled++
+			res.RecycleDir = filepath.Join(dir, pipeline.RecycleDirName)
+			if deleteRaw {
+				res.Raws += recycleRawSiblings(src, dir, res)
+			}
+			continue
 		}
+		if err := os.Remove(src); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.Filename, err))
+			continue
+		}
+		res.Deleted++
 		if deleteRaw {
 			base := strings.TrimSuffix(src, filepath.Ext(src))
 			for _, ext := range rawSiblingExts {
@@ -597,6 +650,46 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw bool) (*GalleryDeleteResult,
 		// 数据库记录与 API 用量记录保留（历史可查）；批量清理走设置页的库管理
 	}
 	return res, nil
+}
+
+// moveToRecycle 把文件移入 sessionDir 下的回收站（重名自动追加 (n) 后缀），返回新路径
+func moveToRecycle(src, sessionDir string) (string, error) {
+	dir := filepath.Join(sessionDir, pipeline.RecycleDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	base := filepath.Base(src)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	dest := filepath.Join(dir, base)
+	for i := 2; ; i++ {
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			break
+		}
+		dest = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", name, i, ext))
+	}
+	if err := os.Rename(src, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// recycleRawSiblings 把同名 RAW/HEIC 伴生文件一并移入回收站，返回成功数
+func recycleRawSiblings(src, sessionDir string, res *GalleryDeleteResult) int {
+	n := 0
+	base := strings.TrimSuffix(src, filepath.Ext(src))
+	for _, ext := range rawSiblingExts {
+		cand := base + ext
+		if rst, err := os.Stat(cand); err == nil && !rst.IsDir() {
+			res.FreedMB += float64(rst.Size()) / 1048576
+			if _, merr := moveToRecycle(cand, sessionDir); merr == nil {
+				n++
+			} else {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", filepath.Base(cand), merr))
+			}
+		}
+	}
+	return n
 }
 
 // PresetUpsert 保存平台预设（同名覆盖；apiKey 为空保持原值）

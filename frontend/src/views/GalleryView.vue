@@ -19,6 +19,10 @@
           <label class="field row" style="flex-direction: row; align-items: center; gap: 6px">
             <input v-model="onlySelected" type="checkbox" @change="applyFilters" /> 只看已选（{{ selected.size }}）
           </label>
+          <label class="field row" style="flex-direction: row; align-items: center; gap: 6px"
+            title="筛选已评分但没有「不足/说明」文字的照片，可全选后批量重评补全">
+            <input v-model="noReason" type="checkbox" @change="applyFilters" /> 无说明（{{ noReasonCount }}）
+          </label>
           <span class="muted">共 {{ items.length }} 张（跨全部批次按源文件去重）</span>
         </div>
         <div class="row">
@@ -45,7 +49,11 @@
         <label class="field row" style="flex-direction: row; align-items: center">
           <input v-model="deleteRaw" type="checkbox" /> 同时删除同名 RAW/HEIC 伴生文件（.raf/.cr2/.nef…）
         </label>
-        <span class="muted">已选 {{ selected.size }} 张 · 将删除源文件，不可恢复</span>
+        <label class="field row" style="flex-direction: row; align-items: center"
+          title="开启后删除=移入源图目录下的 SnapRank_回收站（随后自动打开，可移回反悔或手动清空）；关闭则直接删除源文件">
+          <input v-model="recycleDelete" type="checkbox" @change="saveRecycleOpt" /> 删除时移入回收站
+        </label>
+        <span class="muted">已选 {{ selected.size }} 张 · {{ recycleDelete ? '将移入源图目录下的回收站，可反悔' : '将删除源文件，不可恢复' }}</span>
         <div v-if="rescoring" class="row" style="flex: 1; min-width: 220px; align-items: center">
           <div class="progress-track" style="flex: 1">
             <div class="progress-fill" :style="{ width: rescorePct + '%' }"></div>
@@ -56,8 +64,18 @@
         </div>
       </div>
       <div v-if="delResult" class="muted" style="margin-top: 6px">
-        ✅ 已删除 {{ delResult.deleted }} 张源文件、{{ delResult.raws }} 个 RAW/伴生文件（释放
-        {{ delResult.freed_mb.toFixed(1) }} MB）· 数据库与 API 记录已保留
+        <template v-if="delResult.recycled">
+          ♻️ 已把 {{ delResult.recycled }} 张源文件移入回收站<template v-if="delResult.raws">、{{ delResult.raws }} 个 RAW/伴生文件</template>
+          <button class="btn plain small" @click="openRecycle">📂 打开回收站</button>
+          · 记录已保留：把文件移回原目录即可恢复展示
+        </template>
+        <template v-else-if="delResult.removed_records">
+          📋 已移除 {{ delResult.removed_records }} 条记录（源文件未动）
+        </template>
+        <template v-else>
+          ✅ 已删除 {{ delResult.deleted }} 张源文件、{{ delResult.raws }} 个 RAW/伴生文件（释放
+          {{ delResult.freed_mb.toFixed(1) }} MB）· 数据库与 API 记录已保留
+        </template>
         <span v-if="delResult.missing" class="error-text">（{{ delResult.missing }} 张源文件本已不存在）</span>
         <div v-for="(e, i) in delResult.errors || []" :key="i" class="error-text">{{ e }}</div>
       </div>
@@ -90,9 +108,17 @@
     <!-- 删除二次预览确认 -->
     <div v-if="confirmOpen" class="cf-mask" @click.self="confirmOpen = false">
       <div class="cf-card">
-        <h3 class="title" style="color: var(--danger)">⚠️ 删除确认（第 2 步 / 共 2 步）</h3>
+        <h3 class="title" :style="recycleDelete ? '' : 'color: var(--danger)'">
+          {{ recycleDelete ? '♻️ 移入回收站（第 2 步 / 共 2 步）' : '⚠️ 删除确认（第 2 步 / 共 2 步）' }}
+        </h3>
         <div class="muted" style="margin-bottom: 8px">
-          将永久删除以下 <b>{{ selected.size }}</b> 张照片的源文件{{ deleteRaw ? '，并联动删除同名 RAW/HEIC 伴生文件' : '' }}（不可恢复）：
+          <template v-if="recycleDelete">
+            将把以下 <b>{{ selected.size }}</b> 张照片的源文件移入源图目录下的回收站{{ deleteRaw ? '（含同名 RAW/HEIC 伴生文件）' : '' }}，
+            随后自动打开文件夹——可移回原目录反悔，或自行清空：
+          </template>
+          <template v-else>
+            将永久删除以下 <b>{{ selected.size }}</b> 张照片的源文件{{ deleteRaw ? '，并联动删除同名 RAW/HEIC 伴生文件' : '' }}（不可恢复）：
+          </template>
         </div>
         <div class="cf-list">
           <div v-for="p in selectedItems" :key="p.id" class="cf-row">
@@ -103,8 +129,8 @@
         </div>
         <div class="row" style="justify-content: flex-end; margin-top: 12px">
           <button class="btn plain" @click="confirmOpen = false">取消</button>
-          <button class="btn danger" :disabled="deleting" @click="doDelete">
-            {{ deleting ? '删除中…' : '确认永久删除' }}
+          <button class="btn" :class="recycleDelete ? '' : 'danger'" :disabled="deleting" @click="doDelete">
+            {{ deleting ? '处理中…' : (recycleDelete ? '移入回收站' : '确认永久删除') }}
           </button>
         </div>
       </div>
@@ -128,6 +154,8 @@ const deleting = ref(false)
 const deleteRaw = ref(true)
 const delResult = ref(null)
 const lowThreshold = ref(5)
+const noReason = ref(false) // 无说明筛选：已评分但没有「不足」文字的照片
+const recycleDelete = ref(true) // 删除→回收站（配置持久化，见 saveRecycleOpt）
 // 阈值步进（±0.5）并夹在 0~10
 function bumpThreshold(d) {
   lowThreshold.value = Math.min(10, Math.max(0, +((lowThreshold.value + d).toFixed(1))))
@@ -163,6 +191,9 @@ function thumbFail(p) { p._noThumb = true }
 
 async function load() {
   try {
+    if (state.config && state.config.gallery) {
+      recycleDelete.value = state.config.gallery.recycle_on_delete !== false
+    }
     items.value = await api('/api/gallery')
     applyFilters()
   } catch (e) {
@@ -177,6 +208,7 @@ function applyFilters() {
     const q = search.value.toLowerCase()
     list = list.filter((p) => p.filename.toLowerCase().includes(q))
   }
+  if (noReason.value) list = list.filter((p) => p.status === 'scored' && !p.weakness)
   if (onlySelected.value) list = list.filter((p) => selected.value.has(p.id))
   filtered.value = list
   // 清掉已不在列表中的选择
@@ -190,6 +222,7 @@ watch(() => selected.value.size, () => { if (onlySelected.value) applyFilters() 
 watch(() => state.running, (v, old) => { if (old && !v) load() })
 
 const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).length)
+const noReasonCount = computed(() => items.value.filter((p) => p.status === 'scored' && !p.weakness).length)
 const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))
 const confirmOpen = ref(false)
 
@@ -297,16 +330,35 @@ function stopRescoreWatch() {
 // 仅移除数据库记录（源文件保留或已不存在）
 async function removeRecords() {
   try {
-    await api('/api/gallery/delete', {
+    delResult.value = await api('/api/gallery/delete', {
       method: 'POST',
-      body: JSON.stringify({ ids: [...selected.value], delete_raw: false }),
+      body: JSON.stringify({ ids: [...selected.value], delete_raw: false, records_only: true }),
     })
-    toast('已移除所选记录（源文件保留或已不存在）')
     selected.value = new Set()
     await load()
   } catch (e) {
     toast(e.message, true)
   }
+}
+
+// 回收站开关持久化到配置（失败则回滚勾选状态）
+async function saveRecycleOpt() {
+  try {
+    const cfg = await api('/api/config', {
+      method: 'POST',
+      body: JSON.stringify({ ...state.config, gallery: { recycle_on_delete: recycleDelete.value } }),
+    })
+    state.config = cfg
+  } catch (e) {
+    toast(e.message, true)
+    recycleDelete.value = !recycleDelete.value
+  }
+}
+
+function openRecycle() {
+  const dir = delResult.value && delResult.value.recycle_dir
+  if (!dir) return
+  api('/api/open', { method: 'POST', body: JSON.stringify({ path: dir }) }).catch((e) => toast(e.message, true))
 }
 
 async function doDelete() {
@@ -325,6 +377,10 @@ async function doDelete() {
     })
     selected.value = new Set()
     confirmOpen.value = false
+    // 回收模式：自动打开回收站文件夹，交给用户决定恢复或清空
+    if (delResult.value.recycled && delResult.value.recycle_dir) {
+      api('/api/open', { method: 'POST', body: JSON.stringify({ path: delResult.value.recycle_dir }) }).catch(() => {})
+    }
     await load()
     refreshState()
   } catch (e) {

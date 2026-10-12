@@ -334,17 +334,18 @@ func (s *Server) handleGallery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, items)
 }
 
-// handleGalleryDelete 批量删除照片源文件（危险操作）
+// handleGalleryDelete 批量删除照片源文件（危险操作；records_only 仅删记录）
 func (s *Server) handleGalleryDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		IDs       []int64 `json:"ids"`
-		DeleteRaw bool    `json:"delete_raw"`
+		IDs         []int64 `json:"ids"`
+		DeleteRaw   bool    `json:"delete_raw"`
+		RecordsOnly bool    `json:"records_only"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	res, err := s.core.GalleryDelete(req.IDs, req.DeleteRaw)
+	res, err := s.core.GalleryDelete(req.IDs, req.DeleteRaw, req.RecordsOnly)
 	if err != nil {
 		writeErr(w, 400, err)
 		return

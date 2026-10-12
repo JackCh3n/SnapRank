@@ -80,6 +80,11 @@ type PlatformPreset struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
+// GalleryConfig 图库删除行为
+type GalleryConfig struct {
+	RecycleOnDelete bool `yaml:"recycle_on_delete" json:"recycle_on_delete"` // 删除时移入源图目录下的回收站而非直接删除源文件
+}
+
 // Config 全量配置
 type Config struct {
 	Presets    []PlatformPreset `yaml:"presets" json:"presets"`
@@ -91,6 +96,7 @@ type Config struct {
 	Pipeline   PipelineConfig   `yaml:"pipeline" json:"pipeline"`
 	Cost       CostConfig       `yaml:"cost" json:"cost"`
 	Paths      PathsConfig      `yaml:"paths" json:"paths"`
+	Gallery    GalleryConfig    `yaml:"gallery" json:"gallery"`
 }
 
 // legacyVisionPatterns 旧版默认视觉过滤（会把 glm-5/5.1/5.2 纯文本模型误判为视觉）
@@ -228,6 +234,7 @@ func Default() *Config {
 			LibDir:      `D:\wwwroot\wwwroot\ddGoose-go\lib`,
 			DataDir:     dataDir,
 		},
+		Gallery: GalleryConfig{RecycleOnDelete: true}, // 默认走回收站：多一次反悔机会
 	}
 }
 

@@ -172,6 +172,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { state, api, toast } from '../store.js'
+import { confirmDialog } from '../confirm.js'
 
 const cfg = ref(null)
 const visionPatterns = ref('')
@@ -230,7 +231,7 @@ async function applyPreset(name) {
 
 async function deletePreset() {
   if (!activePresetName.value) return
-  if (!confirm(`删除预设「${activePresetName.value}」？（只删预设本身，不影响当前接入配置）`)) return
+  if (!(await confirmDialog({ title: '删除预设', message: `删除预设「${activePresetName.value}」？\n只删预设本身，不影响当前接入配置`, danger: true, confirmText: '删除' }))) return
   try {
     const cfgNew = await api('/api/preset/delete', { method: 'POST', body: JSON.stringify({ name: activePresetName.value }) })
     state.config = cfgNew
@@ -276,9 +277,7 @@ async function backupDB() {
 }
 
 async function purgeDB() {
-  if (!confirm(`确定清理 ${purgeDays.value} 天前的记录？
-将删除：该时间之前的批次、评分明细、评分缓存、API 用量记录。
-配置与压缩缓存不受影响，此操作不可恢复！`)) return
+  if (!(await confirmDialog({ title: '清理历史记录', message: `确定清理 ${purgeDays.value} 天前的记录？\n将删除：该时间之前的批次、评分明细、评分缓存、API 用量记录。\n配置与压缩缓存不受影响，此操作不可恢复！`, danger: true, confirmText: '清理' }))) return
   purging.value = true
   try {
     const r = await api('/api/db/purge', { method: 'POST', body: JSON.stringify({ days: purgeDays.value }) })
@@ -290,8 +289,8 @@ async function purgeDB() {
 }
 
 async function clearAll() {
-  if (!confirm('确定清空全部数据？将删除：所有会话、评分明细、评分缓存、费用记录、压缩缓存。不影响源图与已归档照片。此操作不可恢复！')) return
-  if (!confirm('再次确认：真的要清空全部数据吗？')) return
+  if (!(await confirmDialog({ title: '清空全部数据', message: '将删除：所有会话、评分明细、评分缓存、费用记录、压缩缓存。\n不影响源图与已归档照片。此操作不可恢复！', danger: true, confirmText: '清空' }))) return
+  if (!(await confirmDialog({ title: '再次确认', message: '真的要清空全部数据吗？', danger: true, confirmText: '确认清空' }))) return
   clearing.value = true
   try {
     const r = await api('/api/clear-all', { method: 'POST', body: '{}' })

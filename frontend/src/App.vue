@@ -37,6 +37,7 @@
     </div>
 
     <div v-if="state.toast" class="toast" :class="{ err: state.toast.err }">{{ state.toast.msg }}</div>
+    <ConfirmDialog />
   </div>
 </template>
 
@@ -48,6 +49,7 @@ import ReviewView from './views/ReviewView.vue'
 import GalleryView from './views/GalleryView.vue'
 import DetailView from './views/DetailView.vue'
 import SettingsView from './views/SettingsView.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 
 const pages = [
   { key: 'run', icon: '📸', label: '运行' },

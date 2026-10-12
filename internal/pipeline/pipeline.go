@@ -32,6 +32,9 @@ const (
 	EstOutTokens = 350
 )
 
+// RecycleDirName 图库删除回收站目录名（建在源图目录下；Scan 跳过该目录，避免重扫进评分流程）
+const RecycleDirName = "SnapRank_回收站"
+
 // Event 事件总线消息（serve 转 SSE，desktop 转 Wails Events）
 type Event struct {
 	Type string      `json:"type"` // progress | stage | done | error
@@ -200,6 +203,9 @@ func (e *Engine) Scan(dir string, formats []string) ([]*ScanItem, float64, error
 			name := info.Name()
 			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "$") {
 				return filepath.SkipDir
+			}
+			if name == RecycleDirName {
+				return filepath.SkipDir // 图库删除回收站：不进评分流程
 			}
 			return nil
 		}
@@ -790,7 +796,9 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		}
 	}
 
-	// ---------- 阶段一：压缩（全部压完再进入评分） ----------
+	// ---------- 阶段一+二：压缩→评分流水线（双池并行） ----------
+	// 压缩池每压完一张立即投喂评分池，评分池有空闲 worker 就开始打分，
+	// 不再等全部压缩完成——大批次时压缩与评分重叠执行，压出第一张即进入评分。
 	// 不支持的格式（RAF/HEIC 等）直接标记跳过，不进压缩队列
 	var compressQueue []*store.Photo
 	for _, p := range queue {
@@ -805,33 +813,41 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	if len(compressQueue) > 0 {
 		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "compress", Total: len(compressQueue)}})
 	}
-	if stopped := e.compressAll(ctx, eng, compressQueue, cacheDir, sessID, len(compressQueue)); stopped {
-		return true
+	// 评分阶段事件：第一张图喂进评分池时切换；全缓存命中批次没有压缩环节，直接宣告
+	var scoreStageOnce sync.Once
+	publishScoreStage := func() {
+		scoreStageOnce.Do(func() {
+			e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "score", Total: totalAll}})
+		})
 	}
+	if len(compressQueue) == 0 && totalAll > 0 {
+		publishScoreStage()
+	}
+	return e.streamPools(ctx, eng, prov, model, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+}
 
-	// ---------- 阶段二：评分（仅压缩成功的照片） ----------
-	// 全缓存命中的批次 queue 为空但仍有进度分母，stage 事件不能漏发，
-	// 否则前端任务卡片标题永远停在「准备中…」
-	if totalAll > 0 {
-		e.Bus.Publish(Event{Type: "stage", Data: Stage{SessionID: sessID, Stage: "score", Total: totalAll}})
-	}
-	var scoreQueue []*store.Photo
-	for _, p := range queue {
-		if p.Status != store.StatusBadImage {
-			scoreQueue = append(scoreQueue, p)
-		}
-	}
+// streamPools 压缩池与评分池流水并行：压缩成功一张投喂一张（通道缓冲承担背压），
+// 评分池来一张评一张。返回是否被停止。
+// 暂停语义：评分 worker 与压缩投料口都在「跑完当前这张后」挂起；
+// 停止语义：ctx 取消后各环节经 select 逃逸，未评分照片留在原状态供续跑。
+func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov provider.Provider, model string,
+	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
+
+	sc := e.cfgFn().Pipeline.ScoreConcurrency
+	cc := e.cfgFn().Pipeline.CompressConcurrency
+	scoreJobs := make(chan *store.Photo, sc) // 缓冲=评分并发：压缩池短暂超前不阻塞
+	compressJobs := make(chan *store.Photo)
 	doneCount := atomic.Int64{}
-	jobs := make(chan *store.Photo)
-	workers := cfg.Pipeline.ScoreConcurrency
-	var wg sync.WaitGroup
 	var stopFlag atomic.Bool
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
+
+	// 评分池：waitIfPaused 同时承担取消判断（取消时返回 false）
+	var scoreWG sync.WaitGroup
+	for i := 0; i < sc; i++ {
+		scoreWG.Add(1)
 		go func() {
-			defer wg.Done()
-			for p := range jobs {
-				if ctx.Err() != nil {
+			defer scoreWG.Done()
+			for p := range scoreJobs {
+				if !e.waitIfPaused(ctx) {
 					stopFlag.Store(true)
 					continue
 				}
@@ -841,36 +857,14 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 			}
 		}()
 	}
-producer:
-	for _, p := range scoreQueue {
-		if !e.waitIfPaused(ctx) {
-			stopFlag.Store(true)
-			break producer
-		}
-		select {
-		case <-ctx.Done():
-			stopFlag.Store(true)
-			break producer
-		case jobs <- p:
-		}
-	}
-	close(jobs)
-	wg.Wait()
-	return stopFlag.Load() && ctx.Err() != nil
-}
 
-// compressAll 并发压缩全部待处理照片；返回是否被停止。
-// 压缩成功的照片标记 compressed；失败的标记 bad_image 并从评分队列剔除。
-func (e *Engine) compressAll(ctx context.Context, eng *compress.Engine, queue []*store.Photo, cacheDir, sessID string, total int) bool {
-	jobs := make(chan *store.Photo)
-	cc := e.cfgFn().Pipeline.CompressConcurrency
-	var wg sync.WaitGroup
-	var stopFlag atomic.Bool
+	// 压缩池：压完一张喂一张（失败标 bad_image，不进评分）
+	var compressWG sync.WaitGroup
 	for i := 0; i < cc; i++ {
-		wg.Add(1)
+		compressWG.Add(1)
 		go func() {
-			defer wg.Done()
-			for p := range jobs {
+			defer compressWG.Done()
+			for p := range compressJobs {
 				if ctx.Err() != nil {
 					stopFlag.Store(true)
 					continue
@@ -879,17 +873,24 @@ func (e *Engine) compressAll(ctx context.Context, eng *compress.Engine, queue []
 				if err != nil {
 					logutil.Info("压缩失败 %s: %v", p.Filename, err)
 					e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
-					p.Status = store.StatusBadImage // 同步内存状态，评分阶段剔除
 					e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}})
 					continue
 				}
 				e.store.SetPhotoCompressed(p.ID, cp)
 				e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusCompressed}})
+				publishScoreStage()
+				select {
+				case scoreJobs <- p:
+				case <-ctx.Done():
+					stopFlag.Store(true)
+				}
 			}
 		}()
 	}
+
+	// 投料：压缩队列逐张派发给压缩池（暂停时挂起派发）
 producer:
-	for _, p := range queue {
+	for _, p := range compressQueue {
 		if !e.waitIfPaused(ctx) {
 			stopFlag.Store(true)
 			break producer
@@ -898,12 +899,14 @@ producer:
 		case <-ctx.Done():
 			stopFlag.Store(true)
 			break producer
-		case jobs <- p:
+		case compressJobs <- p:
 		}
 	}
-	close(jobs)
-	wg.Wait()
-	return stopFlag.Load()
+	close(compressJobs)
+	compressWG.Wait()
+	close(scoreJobs)
+	scoreWG.Wait()
+	return stopFlag.Load() && ctx.Err() != nil
 }
 
 func isFinalStatus(s string) bool {

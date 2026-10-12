@@ -128,6 +128,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { state, api, toast, markForced, rescorePhotos } from '../store.js'
+import { confirmDialog } from '../confirm.js'
 import PhotoModal from '../components/PhotoModal.vue'
 import SessionManager from '../components/SessionManager.vue'
 
@@ -338,7 +339,7 @@ async function setBucket(p, bucket) {
 }
 
 async function doArchive() {
-  if (mode.value === 'move' && !confirm('移动模式会把这些照片从源目录移入归档目录，确认继续？')) return
+  if (mode.value === 'move' && !(await confirmDialog({ title: '移动模式确认', message: '移动模式会把这些照片从源目录移入归档目录，确认继续？' }))) return
   archiving.value = true
   try {
     if (archiveRoot.value && archiveRoot.value !== state.config.paths.archive_root) {

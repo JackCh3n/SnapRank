@@ -562,13 +562,40 @@ func (s *Store) PurgeSpendLogOlderThan(days int) (int64, error) {
 	return n, nil
 }
 
-// DeletePhotosBySrcPaths 删除指定源路径的全部照片记录（跨批次）
+// DeletePhotosByIDs 删除指定照片记录及其评分历史（不动源文件，供「仅移除记录」用）
+// 同一源文件在其他批次还有记录时只删这些 id；要整图消失用 DeletePhotosBySrcPaths
+func (s *Store) DeletePhotosByIDs(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := tx.Exec(`DELETE FROM photo_scores WHERE photo_id=?`, id); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM photos WHERE id=?`, id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeletePhotosBySrcPaths 删除指定源路径的全部照片记录及其评分历史（跨批次）
 func (s *Store) DeletePhotosBySrcPaths(srcPaths []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	for _, sp := range srcPaths {
+		if _, err := tx.Exec(`DELETE FROM photo_scores WHERE photo_id IN (SELECT id FROM photos WHERE src_path=?)`, sp); err != nil {
+			tx.Rollback()
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM photos WHERE src_path=?`, sp); err != nil {
 			tx.Rollback()
 			return err

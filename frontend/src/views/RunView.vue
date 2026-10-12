@@ -152,6 +152,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { state, taskOf, api, toast, refreshState, refreshModels, requestNotifyPermission } from '../store.js'
+import { confirmDialog } from '../confirm.js'
 
 const loadingModels = ref(false)
 const picking = ref(false)
@@ -199,7 +200,7 @@ function useDir(d) {
   doScan()
 }
 async function clearDirHistory() {
-  if (!confirm('清空全部目录历史？')) return
+  if (!(await confirmDialog({ title: '清空目录历史', message: '清空全部目录历史？', danger: true, confirmText: '清空' }))) return
   try {
     await api('/api/dir-history/remove', { method: 'POST', body: JSON.stringify({ dir: '__ALL__' }) })
     const r = await api('/api/state')
@@ -321,17 +322,30 @@ const stageLabel = computed(() =>
 const elapsedText = computed(() => {
   const t = task.value
   if (!t || !t.startedAt || t.finished) return ''
-  const sec = Math.round((Date.now() - t.startedAt) / 1000)
-  return sec >= 60 ? `${Math.floor(sec / 60)}分${sec % 60}秒` : `${sec}秒`
+  return fmtDur(Math.round((Date.now() - t.startedAt) / 1000))
 })
 
+// 时长人性化：秒 → 分秒 → 小时分 → 天小时 → 年天
+function fmtDur(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return ''
+  if (sec < 60) return `${Math.round(sec)} 秒`
+  const m = Math.floor(sec / 60)
+  if (m < 60) return `${m} 分 ${Math.round(sec % 60)} 秒`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} 小时 ${m % 60} 分`
+  const d = Math.floor(h / 24)
+  if (d < 365) return `${d} 天 ${h % 24} 小时`
+  return `${Math.floor(d / 365)} 年 ${Math.round(d % 365)} 天`
+}
 function fmtEta(sec) {
-  if (sec <= 0) return ''
-  if (sec < 60) return `剩余 约 ${sec} 秒`
-  return `剩余 约 ${Math.floor(sec / 60)} 分 ${Math.round(sec % 60)} 秒`
+  const s = fmtDur(sec)
+  return s ? `剩余 约 ${s}` : ''
 }
 
-// ETA：按当前阶段内最近完成事件的速率估算（每秒刷新由 tick 定时器驱动）
+// ETA：取当前阶段最近 ETA_WINDOW 条真实事件估速率（滑动窗口，提速/卡顿都能及时反映）。
+// 刷新页面后 hydrate 回填的历史项 _ts 为 0（时间未知），必须排除——
+// 此前混入样本会把时间跨度算成 Date.now() 级别（几十年），ETA 显示几百万分钟且几乎不降
+const ETA_WINDOW = 20
 const etaText = ref('')
 let etaTimer = null
 function tickEta() {
@@ -340,12 +354,14 @@ function tickEta() {
   const done = stage.value === 'compress' ? compressDone.value : scoreDone.value
   if (done <= 0) { etaText.value = ''; return }
   if (done >= t.total) { etaText.value = '即将完成…'; return }
-  // 当前阶段内首尾事件的时间跨度（压缩与评分交界处会短暂偏大，可接受）
-  const stageStatuses = stage.value === 'compress'
+  const stageStatuses = (stage.value === 'compress'
     ? t.progress.filter((x) => x.status === 'compressed')
     : t.progress.filter((x) => FINAL.has(x.status))
-  const span = (stageStatuses[stageStatuses.length - 1]._ts - stageStatuses[0]._ts) / 1000
-  const rate = span / Math.max(1, stageStatuses.length - 1)
+  ).filter((x) => x._ts > 0)
+  if (stageStatuses.length < 2) { etaText.value = ''; return }
+  const win = stageStatuses.slice(-ETA_WINDOW)
+  const rate = ((win[win.length - 1]._ts - win[0]._ts) / 1000) / (win.length - 1)
+  if (rate <= 0) { etaText.value = ''; return }
   etaText.value = fmtEta(Math.round((t.total - done) * rate))
 }
 watch(selectedTask, () => tickEta())
@@ -582,7 +598,7 @@ async function hydrateTasks() {
       const t = taskOf(sid)
       t.progress = r.items
         .filter((p) => p.status === 'compressed' || FINAL.has(p.status))
-        .map((p) => ({ file: p.filename, score: p.score, status: p.status, error: p.error, cached: p.source === 'cache', _ts: 0 }))
+        .map((p) => ({ file: p.filename, score: p.score, status: p.status, error: p.error, cached: p.source === 'cache', _ts: 0 })) // _ts:0=时间未知，ETA 速率计算会排除
       t.total = r.total
       if (!t.stage) t.stage = 'score'
     } catch { /* 会话不可读则跳过 */ }
