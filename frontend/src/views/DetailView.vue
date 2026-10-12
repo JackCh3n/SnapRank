@@ -6,6 +6,7 @@
           <label class="field">
             会话
             <select v-model="sessionID" @change="load(1)">
+              <option value="__ALL__">📋 所有会话（全部记录）</option>
               <option v-for="s in sessions" :key="s.id" :value="s.id">
                 {{ s.name || s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）
               </option>
@@ -61,7 +62,9 @@
       <table class="list" v-if="items.length">
         <thead>
           <tr>
-            <th>缩略</th><th>文件名</th><th>状态</th>
+            <th>缩略</th><th>文件名</th>
+            <th v-if="isAllSessions" class="clip" title="记录所属批次">批次</th>
+            <th>状态</th>
             <th class="sortable" @click="toggleSort('score')">总分 {{ arrow('score') }}</th>
             <th class="sortable" @click="toggleSort('technique')">技 {{ arrow('technique') }}</th>
             <th class="sortable" @click="toggleSort('composition')">构 {{ arrow('composition') }}</th>
@@ -75,6 +78,7 @@
             <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" class="mini clickable"
               loading="lazy" @click="preview = p" title="点击查看大图" /></td>
             <td class="clip" :title="p.src_path">{{ p.filename }}</td>
+            <td v-if="isAllSessions" class="clip" :title="p.session_id">{{ sessionLabel(p.session_id) }}</td>
             <td><span class="tag" :class="{ warn: p.status !== 'scored' }">{{ statusLabel(p.status) }}</span></td>
             <td><b>{{ p.status === 'scored' ? p.score.toFixed(1) : '-' }}</b></td>
             <td>{{ d(p, 'technique') }}</td><td>{{ d(p, 'composition') }}</td>
@@ -128,10 +132,18 @@ const showManager = ref(false)
 
 async function onSessionsChanged() {
   await loadSessions()
-  if (!sessions.value.find((x) => x.id === sessionID.value)) {
+  if (sessionID.value !== '__ALL__' && !sessions.value.find((x) => x.id === sessionID.value)) {
     sessionID.value = sessions.value.length ? sessions.value[0].id : ''
   }
   load(1)
+}
+
+// 「所有会话」模式：不按会话过滤，展示全部批次的所有记录（含跨批次重复）
+const isAllSessions = computed(() => sessionID.value === '__ALL__')
+// 批次列短标签：有备注用备注，否则取会话 ID 尾部随机段（悬停可见完整 ID）
+function sessionLabel(id) {
+  const s = sessions.value.find((x) => x.id === id)
+  return (s && s.name) || (id || '').slice(-4)
 }
 
 // 分数段判定（跟随配置阈值 t=[high,mid,low]）

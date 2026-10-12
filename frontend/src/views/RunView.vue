@@ -96,55 +96,54 @@
       </div>
     </div>
 
-    <div class="card" v-if="taskIds.length">
-      <h3 class="title">
-        ③ 任务进度
-        <select v-model="selectedTask" class="task-sel">
-          <option v-for="sid in taskIds" :key="sid" :value="sid">{{ taskLabel(sid) }}</option>
-        </select>
-      </h3>
+    <div class="card" v-if="hasQueue">
+      <h3 class="title">③ 评分进度</h3>
 
-      <template v-if="task">
-        <template v-if="isQueued">
-          <div class="row" style="justify-content: space-between; align-items: center">
-            <div class="muted">⏳ 排队中，等待前面的任务完成后自动开始…</div>
-            <button class="btn plain small danger-text" @click="removeQueued">🗑 从队列移除</button>
+      <div class="row" style="justify-content: space-between; align-items: center; margin: 2px 0 6px">
+        <div>
+          <b>⏳ 待评分 {{ waitingCount }}</b> 张 · <b>✅ 已评完 {{ state.tally.done }}</b> 张
+          <span v-if="state.tally.fail" class="error-text">· ❌ 失败{{ autoRetry ? '待重试' : '' }} {{ state.tally.fail }}</span>
+        </div>
+        <span class="row" style="gap: 8px; align-items: center">
+          <span class="eta" v-if="etaText">{{ etaText }}</span>
+          <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
+          <template v-if="state.running">
+            <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
+            <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
+            <button class="btn danger small" @click="doStop">■ 停止</button>
+          </template>
+          <span v-else-if="state.tally.done || state.tally.fail" class="tag">✓ 本轮已评完</span>
+        </span>
+      </div>
+      <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
+      <div class="muted" style="margin: 6px 0 10px">
+        <span v-if="elapsedText">已用时 {{ elapsedText }}</span>
+      </div>
+
+      <!-- 排队中的目录：当前评分完成后自动开始 -->
+      <div v-for="q in queuedDirs" :key="q.sid" class="row" style="align-items: center; gap: 8px; margin-bottom: 4px">
+        <span class="tag">⏳ 排队</span>
+        <span class="muted" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="q.dir">{{ q.label }}</span>
+        <span class="muted">等待当前评分完成后自动开始</span>
+        <button class="btn plain small danger-text" @click="removeQueued(q.sid)">🗑 移除</button>
+      </div>
+
+      <div v-if="state.scoreFeed.length">
+        <div class="muted" style="margin: 6px 0 4px">最近评完（{{ state.scoreFeed.length }} 条）：</div>
+        <div class="feed">
+          <div v-for="(p, i) in state.scoreFeed" :key="i" class="feed-item">
+            <span class="mono">{{ iconOf(p.status) }}</span>
+            <span class="fname" :title="p.file">{{ p.file }}</span>
+            <span v-if="p.status === 'scored'" class="score">{{ p.score.toFixed(1) }} 分</span>
+            <span v-else-if="p.status === 'parse_fail'" class="error-text">解析失败{{ autoRetry ? '（将重新排队）' : '（待复检）' }}</span>
+            <span v-else-if="p.status === 'failed'" class="error-text">调用失败{{ autoRetry ? '（将重新排队）' : '' }}</span>
+            <span v-else class="error-text" :title="p.error">{{ statusLabel(p.status) }}</span>
+            <span v-if="p.cached" class="tag">缓存</span>
+            <span v-if="state.forcedFiles.has(p.session_id + '|' + p.file)" class="tag force-tag">强制</span>
+            <span v-if="state.retryFiles.has(p.session_id + '|' + p.file)" class="tag retry-tag">重试</span>
           </div>
-        </template>
-        <template v-else>
-          <h3 class="title sub">
-            {{ stageLabel }} {{ doneCount }}/{{ totalStr }}
-            <span class="eta" v-if="etaText">{{ etaText }}</span>
-            <span v-if="isCurrent" class="row" style="margin-left: auto; gap: 8px; align-items: center">
-              <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
-              <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
-              <button v-else class="btn small" @click="resumeTask">▶ 继续</button>
-              <button class="btn danger small" @click="doStop">■ 停止</button>
-            </span>
-            <span v-else-if="task.finished" class="tag">{{ task.stopped ? '■ 已停止' : '✓ 已完成' }}</span>
-          </h3>
-          <div class="muted feed-stats" v-if="feedStats" style="margin: 2px 0 6px">
-            ✅ 成功 {{ feedStats.ok }} · <span :class="{ 'error-text': feedStats.fail > 0 }">❌ 失败{{ task.autoRetry ? '待重试' : '' }} {{ feedStats.fail }}</span> · ⏳ 待评分 {{ feedStats.comp }}<template v-if="total"> · 📷 剩余 {{ remainCount }}</template>
-          </div>
-          <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
-          <div class="muted" style="margin: 6px 0 10px">
-            <span v-if="elapsedText">已用时 {{ elapsedText }}</span>
-          </div>
-          <div class="feed">
-            <div v-for="(p, i) in task.progress" :key="i" class="feed-item">
-              <span class="mono">{{ iconOf(p.status) }}</span>
-              <span class="fname" :title="p.file">{{ p.file }}</span>
-              <span v-if="p.status === 'scored'" class="score">{{ p.score.toFixed(1) }} 分</span>
-              <span v-else-if="p.status === 'parse_fail'" class="error-text">解析失败{{ task.autoRetry ? '（将重新排队）' : '（待复检）' }}</span>
-              <span v-else-if="p.status === 'failed'" class="error-text">调用失败{{ task.autoRetry ? '（将重新排队）' : '' }}</span>
-              <span v-else-if="p.status !== 'compressed'" class="error-text" :title="p.error">{{ statusLabel(p.status) }}</span>
-              <span v-if="p.cached" class="tag">缓存</span>
-              <span v-if="state.forcedFiles.has(selectedTask + '|' + p.file)" class="tag force-tag">强制</span>
-              <span v-if="state.retryFiles.has(selectedTask + '|' + p.file)" class="tag retry-tag">重试</span>
-            </div>
-          </div>
-        </template>
-      </template>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -221,36 +220,15 @@ async function removeDir(d) {
   }
 }
 
-// ---------- 多任务 ----------
+// ---------- 评分队列 ----------
 const FINAL = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
-const selectedTask = ref('')
-
-// 任务列表：运行中 → 排队 → 其他（含已完成）
-const taskIds = computed(() => {
-  const ids = []
-  const cur = state.queue.current
-  if (cur) ids.push(cur)
-  for (const q of state.queue.queued) if (!ids.includes(q)) ids.push(q)
-  for (const k of Object.keys(state.tasks)) if (!ids.includes(k)) ids.push(k)
-  return ids
-})
 const queueCount = computed(() => state.queue.queued.length)
 
-function taskLabel(sid) {
-  const t = state.tasks[sid] || {}
-  let st = ''
-  if (sid === state.queue.current) st = state.queue.paused ? '⏸ 已暂停' : '▶ 运行中'
-  else if (state.queue.queued.includes(sid)) st = '⏳ 排队中'
-  else if (t.stopped) st = '■ 已停止'
-  else if (t.finished) st = '✓ 已完成'
-  return (st ? st + ' ' : '') + sid
-}
-
-// ---------- 任务管理：暂停 / 继续 / 移除排队任务 ----------
+// ---------- 评分管理：暂停 / 继续 / 移除排队目录 ----------
 async function pauseTask() {
   try {
     const r = await api('/api/task/pause', { method: 'POST', body: '{}' })
-    toast(r.paused ? '已暂停：正在评分的这张完成后挂起' : '暂停失败（任务可能刚结束）', !r.paused)
+    toast(r.paused ? '已暂停：正在评分的这张完成后挂起' : '暂停失败（评分可能刚结束）', !r.paused)
   } catch (e) {
     toast(e.message, true)
   }
@@ -258,70 +236,64 @@ async function pauseTask() {
 async function resumeTask() {
   try {
     const r = await api('/api/task/resume', { method: 'POST', body: '{}' })
-    toast(r.resumed ? '任务已继续' : '恢复失败（任务未在暂停中）', !r.resumed)
+    toast(r.resumed ? '已继续评分' : '恢复失败（未在暂停中）', !r.resumed)
   } catch (e) {
     toast(e.message, true)
   }
 }
-async function removeQueued() {
-  const sid = selectedTask.value
+async function removeQueued(sid) {
   if (!sid) return
   try {
     const r = await api('/api/task/remove', { method: 'POST', body: JSON.stringify({ session: sid }) })
     if (r.removed) {
-      toast(`已从队列移除任务 ${sid}`)
+      toast('已从排队中移除')
       delete state.tasks[sid]
-      selectedTask.value = state.queue.current || state.queue.queued[0] || ''
     } else {
-      toast('移除失败（任务可能已开始运行）', true)
+      toast('移除失败（可能已开始评分）', true)
     }
   } catch (e) {
     toast(e.message, true)
   }
 }
 
-const task = computed(() => taskOf(selectedTask.value))
-const isQueued = computed(() => {
-  const sid = selectedTask.value
-  return !!sid && sid !== state.queue.current && state.queue.queued.includes(sid)
-})
-// 正在查看的是当前运行中的任务（暂停/继续/停止只对它有效）
-const isCurrent = computed(() => !!selectedTask.value && selectedTask.value === state.queue.current)
+// 当前运行中的任务（ETA/用时/暂停停止都只针对它）
+const cur = computed(() => taskOf(state.queue.current))
+const autoRetry = computed(() => !!(cur.value && cur.value.autoRetry))
 
-const stage = computed(() => (task.value && task.value.stage) || '')
-const total = computed(() => (task.value && task.value.total) || 0)
-const compressDone = computed(() => (task.value ? task.value.progress.filter((x) => x.status === 'compressed').length : 0))
-const scoreDone = computed(() => (task.value ? task.value.progress.filter((x) => FINAL.has(x.status)).length : 0))
+const stage = computed(() => (cur.value && cur.value.stage) || '')
+const total = computed(() => (cur.value && cur.value.total) || 0)
+// 用单调计数器而非重数 feed（feed 有 400 条上限，大批次会丢旧事件导致「已完成但剩余>0」）
+const compressDone = computed(() => (cur.value ? cur.value.compN : 0))
+const scoreDone = computed(() => (cur.value ? cur.value.finalN : 0))
 const doneCount = computed(() => (stage.value === 'compress' ? compressDone.value : scoreDone.value))
-const totalStr = computed(() => total.value || '?')
 
-// 图片级队列摘要：按文件名取最后一次状态统计
-const feedStats = computed(() => {
-  const t = task.value
-  if (!t || !t.progress.length) return null
-  const last = {}
-  for (const p of t.progress) last[p.file] = p.status
-  let ok = 0, fail = 0, comp = 0
-  for (const s of Object.values(last)) {
-    if (s === 'scored') ok++
-    else if (s === 'failed' || s === 'parse_fail') fail++
-    else if (s === 'compressed') comp++
+// 队列视图：待评分 = 当前未评完 + 各排队目录的未评完（入队/刷新时登记总数）
+const waitingCount = computed(() => {
+  let n = 0
+  for (const sid of [state.queue.current, ...state.queue.queued]) {
+    const t = state.tasks[sid]
+    if (t && t.total) n += Math.max(0, t.total - (t.finalN || 0))
   }
-  return { ok, fail, comp }
+  return n
 })
-const remainCount = computed(() => {
-  const t = total.value
-  if (!t) return '?'
-  return Math.max(0, t - (doneCount.value || 0))
+const queuedDirs = computed(() => state.queue.queued.map((sid) => {
+  const t = state.tasks[sid] || {}
+  const dir = t.dir || ''
+  return { sid, dir, label: dir ? shortDirLabel(dir) : '待评分目录' }
+}))
+function shortDirLabel(d) {
+  const parts = String(d).split(/[\\/]/).filter(Boolean)
+  return parts.slice(-2).join('/')
+}
+const hasQueue = computed(() =>
+  state.running || state.queue.queued.length || state.scoreFeed.length || state.tally.done || state.tally.fail)
+const pct = computed(() => {
+  const denom = state.tally.done + waitingCount.value
+  return denom ? Math.min(100, (state.tally.done / denom) * 100) : 0
 })
-const pct = computed(() => (total.value ? Math.min(100, (doneCount.value / total.value) * 100) : 0))
-
-const stageLabel = computed(() =>
-  ({ compress: '阶段一：压缩图片', score: '阶段二：AI 评分' }[stage.value] || '准备中…'))
-
 const elapsedText = computed(() => {
-  const t = task.value
-  if (!t || !t.startedAt || t.finished) return ''
+  const t = cur.value
+  if (!t || !t.startedAt || !state.running) return ''
   return fmtDur(Math.round((Date.now() - t.startedAt) / 1000))
 })
 
@@ -349,7 +321,7 @@ const ETA_WINDOW = 20
 const etaText = ref('')
 let etaTimer = null
 function tickEta() {
-  const t = taskOf(selectedTask.value)
+  const t = cur.value
   if (!t || t.finished || !t.total || !t.progress.length) { etaText.value = ''; return }
   const done = stage.value === 'compress' ? compressDone.value : scoreDone.value
   if (done <= 0) { etaText.value = ''; return }
@@ -364,14 +336,9 @@ function tickEta() {
   if (rate <= 0) { etaText.value = ''; return }
   etaText.value = fmtEta(Math.round((t.total - done) * rate))
 }
-watch(selectedTask, () => tickEta())
 let etaTimer2 = etaTimer
 onMounted(() => { etaTimer2 = setInterval(tickEta, 1000) })
 onBeforeUnmount(() => clearInterval(etaTimer2))
-
-watch(taskIds, (ids) => {
-  if (!ids.includes(selectedTask.value)) selectedTask.value = ids[0] || ''
-}, { immediate: true })
 
 function iconOf(status) {
   if (status === 'scored') return '✅'
@@ -562,17 +529,19 @@ async function doStart(sample) {
       method: 'POST',
       body: JSON.stringify({ dir: state.dir, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample }),
     })
-    selectedTask.value = r.session_id
-    taskOf(r.session_id).autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
-    taskOf(r.session_id)
+    const t = taskOf(r.session_id)
+    t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
+    t.dir = state.dir // 排队目录名（队列视图展示用）
+    // 入队即登记该目录的图片数（待评分计数包含排队目录；失败静默，开始后 stage 会再给）
+    api(`/api/photos?session=${r.session_id}&page_size=1`).then((rr) => { if (rr.total) t.total = rr.total }).catch(() => {})
     state.currentModel = r.model || state.currentModel
     const queued = state.queue.queued.includes(r.session_id)
     const nightTag = nightMode.value && !sample ? '🔁 自动重试：' : ''
     if (r.resumed) {
-      toast(`${nightTag}已创建任务（继续上次：剩余 ${r.pending} 张）${queued ? '，已加入队列' : ''}`)
+      toast(`${nightTag}继续上次：剩余 ${r.pending} 张待评分${queued ? '，已排队' : ''}`)
     }
-    else if (queued) toast(`${nightTag}任务已排队：${r.session_id}（前方还有 ${state.queue.queued.indexOf(r.session_id)} 个任务）`)
-    else toast(`${nightTag}任务已开始：${r.session_id}（模型 ${r.model}）`)
+    else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(r.session_id)} 个目录）`)
+    else toast(`${nightTag}开始评分（模型 ${r.model}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)
@@ -594,13 +563,38 @@ async function hydrateTasks() {
   const ids = [state.queue.current, ...state.queue.queued].filter(Boolean)
   for (const sid of ids) {
     try {
-      const r = await api(`/api/photos?page=1&page_size=200&session=${sid}`)
+      // 分页拉全（>200 张一页拿不完；旧版后端无 LIMIT 会一次全给，两种都兼容）
+      let items = [], total = 0, page = 1
+      for (;;) {
+        const r = await api(`/api/photos?page=${page}&page_size=200&session=${sid}`)
+        total = r.total
+        items = items.concat(r.items)
+        if (items.length >= total || !r.items.length || page >= 50) break
+        page++
+      }
       const t = taskOf(sid)
-      t.progress = r.items
+      t.progress = items
         .filter((p) => p.status === 'compressed' || FINAL.has(p.status))
         .map((p) => ({ file: p.filename, score: p.score, status: p.status, error: p.error, cached: p.source === 'cache', _ts: 0 })) // _ts:0=时间未知，ETA 速率计算会排除
-      t.total = r.total
+      if (t.progress.length > 400) t.progress.splice(0, t.progress.length - 400)
+      t.total = total
       if (!t.stage) t.stage = 'score'
+      if (items.length) t.dir = items[0].src_path.replace(/[\\/][^\\/]+$/, '') // 排队目录名
+      // 单调统计按回填记录播种（feed 仅作展示）
+      t.lastStatus = {}
+      t.compN = 0
+      t.finalN = 0
+      for (const p of items) {
+        if (p.status !== 'compressed' && !FINAL.has(p.status)) continue
+        t.lastStatus[p.filename] = p.status
+        if (p.status === 'compressed') t.compN++
+        else t.finalN++
+        // 全局累计与「最近评完」滚动列表同步播种
+        if (p.status === 'scored') state.tally.done++
+        else if (p.status === 'failed' || p.status === 'parse_fail') state.tally.fail++
+        state.scoreFeed.push({ file: p.filename, status: p.status, score: p.score, error: p.error, cached: p.source === 'cache', session_id: sid })
+      }
+      if (state.scoreFeed.length > 10) state.scoreFeed.splice(0, state.scoreFeed.length - 10)
     } catch { /* 会话不可读则跳过 */ }
   }
 }

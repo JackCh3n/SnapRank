@@ -113,6 +113,8 @@
           <a v-if="shareUrl" class="btn plain small" :href="shareUrl"
             :download="`SnapRank_${(p.filename || 'photo').replace(/\.[^.]+$/, '')}.png`">下载卡片</a>
           <span class="pm-flex"></span>
+          <button class="btn plain small" :class="{ 'fav-on': p.favorite }" title="标记喜欢：低分筛选会跳过这张图"
+            @click="toggleFav">{{ p.favorite ? '❤ 已喜欢' : '♡ 喜欢' }}</button>
           <button v-if="canRescore" class="btn plain small" :disabled="busy"
             title="重新调用 AI 评分（忽略缓存）" @click="startRescore">↻ 复检重评</button>
           <button class="btn plain small danger-text" :disabled="deleting" title="删除源文件和 RAW 伴生文件（评分记录保留）；快捷键 Delete"
@@ -155,6 +157,17 @@ const props = defineProps({
 const emit = defineEmits(['close', 'rescore', 'navigate', 'deleted'])
 
 const p = computed(() => props.photo)
+
+// 标记/取消喜欢（按指纹持久化；直接改 props.photo 上的字段，图库卡片同步更新）
+async function toggleFav() {
+  const on = !props.photo.favorite
+  try {
+    await api('/api/photo/favorite', { method: 'POST', body: JSON.stringify({ id: props.photo.id, on }) })
+    props.photo.favorite = on
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 const sharing = ref(false)
 const copyHint = ref('📋 复制分享卡片')
 const shareUrl = ref('')
@@ -572,6 +585,7 @@ async function copyShareCard() {
 .pm-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
 .pm-actions { display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 14px; }
+.fav-on { color: #fa5151; font-weight: 600; }
 
 .pm-history { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .pm-h-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }

@@ -1,6 +1,9 @@
 import { reactive } from 'vue'
 
 // 全局响应式状态
+// 终态集合（与 RunView 的 FINAL 一致）：这些状态计入「已完成」计数
+const FINAL_STATUS = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
+
 export const state = reactive({
   page: 'run',                 // run | review | detail | settings
   theme: localStorage.getItem('sr_theme') || 'light',
@@ -20,6 +23,8 @@ export const state = reactive({
   importDir: '',               // 当前导入任务目录（贴入/拖入统一归类，后续追加）
   forcedFiles: new Set(),      // 强制评分标记：`session|文件名`（重评/复检入队的图片，忽略缓存重调）
   retryFiles: new Set(),       // 自动重试标记：`session|文件名`（失败后重新排队的图片）
+  scoreFeed: [],               // 最近评完的 10 条（跨任务滚动，仅作展示）
+  tally: { done: 0, fail: 0 }, // 本页面会话累计：已评完 / 失败张数
   toast: null,
 })
 
@@ -40,11 +45,14 @@ export async function rescorePhotos(body) {
   return api('/api/rescore', { method: 'POST', body: JSON.stringify(body) })
 }
 
-// 获取（或初始化）某任务的进度容器
+// 获取（或初始化）某任务的进度容器。
+// lastStatus/compN/finalN 是单调统计：feed 有 400 条上限会丢旧事件，
+// 成功/剩余等数字不能从 feed 重数（大批次会出现「350/507 已完成但剩余 157」的假象）
 export function taskOf(sid) {
   if (!sid) return null
   if (!state.tasks[sid]) {
-    state.tasks[sid] = { progress: [], total: 0, stage: '', startedAt: 0, finished: false }
+    state.tasks[sid] = { progress: [], total: 0, stage: '', startedAt: 0, finished: false,
+      lastStatus: {}, compN: 0, finalN: 0 }
   }
   return state.tasks[sid]
 }
@@ -171,6 +179,17 @@ export function connectSSE() {
     if (!t.startedAt) t.startedAt = Date.now()
     t.progress.push({ ...d, _ts: Date.now() })
     if (t.progress.length > 400) t.progress.splice(0, t.progress.length - 400)
+    // 单调统计（feed 上限不影响）：按文件名记最新状态 + 压缩/完成计数
+    t.lastStatus[d.file] = d.status
+    if (d.status === 'compressed') t.compN++
+    if (FINAL_STATUS.has(d.status)) t.finalN++
+    // 全局累计与「最近评完」滚动列表（运行页只展示待评分 + 最近 10 条）
+    if (d.status === 'scored') state.tally.done++
+    else if (d.status === 'failed' || d.status === 'parse_fail') state.tally.fail++
+    if (FINAL_STATUS.has(d.status)) {
+      state.scoreFeed.push({ file: d.file, status: d.status, score: d.score, error: d.error, cached: d.cached, session_id: d.session_id })
+      if (state.scoreFeed.length > 10) state.scoreFeed.splice(0, state.scoreFeed.length - 10)
+    }
     // 评分成功：摘除强制/重试标记
     if (d.status === 'scored') {
       const key = d.session_id + '|' + d.file
@@ -196,15 +215,15 @@ export function connectSSE() {
     if (t) { t.finished = true; t.stopped = !!d.stopped }
     refreshState()
     if (d.stopped) {
-      toast(`任务 ${d.session_id} 已停止`)
-      notifyDesktop('SnapRank 任务已停止', d.session_id)
+      toast('已停止：未评完的图片下次开始时自动继续')
+      notifyDesktop('SnapRank 评分已停止', '未评完的图片下次继续')
     } else if (d.night) {
       const ok = d.failed > 0
       const msg = ok ? `仍有 ${d.failed} 张持续失败（已停止重试）` : '全部评分成功'
       toast(`🔁 自动重试结束：${msg}`)
       notifyDesktop(ok ? 'SnapRank 重试结束（有失败）' : 'SnapRank 评分全部完成', msg)
     } else {
-      notifyDesktop('SnapRank 任务完成', d.session_id)
+      notifyDesktop('SnapRank 评分完成', '本轮全部评完')
     }
   })
   es.addEventListener('error', (e) => {

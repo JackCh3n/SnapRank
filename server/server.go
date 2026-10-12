@@ -67,6 +67,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/photos", s.handlePhotos)
 	s.mux.HandleFunc("GET /api/photo", s.handlePhoto)
 	s.mux.HandleFunc("POST /api/photo/bucket", s.handleBucket)
+	s.mux.HandleFunc("POST /api/photo/favorite", s.handleFavorite)
 	s.mux.HandleFunc("POST /api/recalculate", s.handleRecalc)
 	s.mux.HandleFunc("POST /api/rescore", s.handleRescore)
 	s.mux.HandleFunc("POST /api/task/pause", s.handleTaskPause)
@@ -585,6 +586,23 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"ok": "1"})
+}
+
+// handleFavorite 标记/取消「喜欢」（按内容指纹，低分筛选跳过已标记）
+func (s *Server) handleFavorite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID int64 `json:"id"`
+		On bool  `json:"on"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.SetPhotoFavorite(req.ID, req.On); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true, "on": req.On})
 }
 
 func (s *Server) handleRecalc(w http.ResponseWriter, r *http.Request) {

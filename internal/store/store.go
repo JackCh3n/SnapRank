@@ -180,6 +180,10 @@ CREATE TABLE IF NOT EXISTS spend_log (
   model TEXT NOT NULL,
   photos INTEGER NOT NULL,
   est_cost REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS photo_favorites (
+  fingerprint TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
 );`)
 	// 旧库迁移：批次备注列
 	if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -562,8 +566,35 @@ func (s *Store) PurgeSpendLogOlderThan(days int) (int64, error) {
 	return n, nil
 }
 
-// DeletePhotosByIDs 删除指定照片记录及其评分历史（不动源文件，供「仅移除记录」用）
-// 同一源文件在其他批次还有记录时只删这些 id；要整图消失用 DeletePhotosBySrcPaths
+// SetFavorite 按内容指纹标记/取消「喜欢」（重扫重评生成新记录后标记仍生效）
+func (s *Store) SetFavorite(fingerprint string, on bool) error {
+	if on {
+		_, err := s.db.Exec(`INSERT OR IGNORE INTO photo_favorites(fingerprint, created_at) VALUES (?, ?)`, fingerprint, now())
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM photo_favorites WHERE fingerprint=?`, fingerprint)
+	return err
+}
+
+// FavoriteFingerprints 全部「喜欢」的指纹集合
+func (s *Store) FavoriteFingerprints() ([]string, error) {
+	rows, err := s.db.Query(`SELECT fingerprint FROM photo_favorites`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, err
+		}
+		list = append(list, f)
+	}
+	return list, rows.Err()
+}
+
+// DeletePhotosByIDs 删除指定照片记录及其评分历史（不动源文件，供「仅移除记录」用）// 同一源文件在其他批次还有记录时只删这些 id；要整图消失用 DeletePhotosBySrcPaths
 func (s *Store) DeletePhotosByIDs(ids []int64) error {
 	if len(ids) == 0 {
 		return nil
@@ -636,7 +667,7 @@ var (
 
 func init() {
 	const base = `SELECT ` + photoCols + ` FROM photos
-WHERE session_id = ?
+WHERE (? = '' OR session_id = ?)
   AND (? = '' OR status = ?)
   AND (? = '' OR model = ?)
   AND (? = '' OR source = ?)
@@ -644,7 +675,7 @@ WHERE session_id = ?
   AND (? < 0 OR score < ?)
 `
 	const countBase = `SELECT COUNT(*) FROM photos
-WHERE session_id = ?
+WHERE (? = '' OR session_id = ?)
   AND (? = '' OR status = ?)
   AND (? = '' OR model = ?)
   AND (? = '' OR source = ?)
@@ -653,21 +684,22 @@ WHERE session_id = ?
 `
 	listPhotosSQL = map[string]string{}
 	for k, clause := range orderClauses {
-		listPhotosSQL[k] = base + clause
+		listPhotosSQL[k] = base + clause + "\nLIMIT ? OFFSET ?"
 	}
-	listPhotosSQL[""] = base + "ORDER BY id"
+	listPhotosSQL[""] = base + "ORDER BY id\nLIMIT ? OFFSET ?"
 	listPhotosCountSQL = countBase + "ORDER BY id"
 }
 
-// ListPhotos 会话明细分页查询；status/model/source 为空、minScore/maxScore<0 时
-// 对应条件被参数短路跳过；sortKey:sortDir 组合必须命中常量子句映射
+// ListPhotos 会话明细分页查询；sessionID 为空串时不过滤会话（所有会话全部记录）；
+// status/model/source 为空、minScore/maxScore<0 时对应条件被参数短路跳过；
+// sortKey:sortDir 组合必须命中常量子句映射
 func (s *Store) ListPhotos(sessionID, status string, offset, limit int, sortKey, sortDir, model, source string, minScore, maxScore float64) ([]*Photo, int, error) {
 	sqlText, ok := listPhotosSQL[sortKey+":"+sortDir]
 	if !ok {
 		sqlText = listPhotosSQL[""]
 	}
 	args := []interface{}{
-		sessionID,
+		sessionID, sessionID,
 		status, status,
 		model, model,
 		source, source,

@@ -82,8 +82,16 @@
     </div>
 
     <div class="card" v-if="filtered.length">
+      <!-- 分页渲染：全量列表只做筛选/勾选/弹窗导航，DOM 只挂当前页（图片多时不卡） -->
+      <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 10px">
+        <span class="muted">筛选结果 {{ filtered.length }} 张 · 第 {{ page }} / {{ totalPages }} 页</span>
+        <span class="row" style="gap: 8px; align-items: center">
+          <button class="btn plain small" :disabled="page <= 1" @click="page--; scrollToTop()">上一页</button>
+          <button class="btn plain small" :disabled="page >= totalPages" @click="page++; scrollToTop()">下一页</button>
+        </span>
+      </div>
       <div class="photo-grid">
-        <div v-for="p in filtered" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id) }"
+        <div v-for="p in paged" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id) }"
           @click="preview = p" title="点击查看大图；勾选左上角选择框进行批量操作">
           <div class="thumb-wrap">
             <input type="checkbox" class="sel-box" :checked="selected.has(p.id)"
@@ -91,6 +99,8 @@
             <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" loading="lazy" @error="thumbFail(p)" />
             <div v-else class="no-thumb">无预览</div>
             <span class="score-badge" :class="badgeClass(p)">{{ badgeText(p) }}</span>
+            <button class="fav-btn" :class="{ on: p.favorite }" :title="p.favorite ? '取消喜欢' : '标记喜欢：低分筛选会跳过这张图'"
+              @click.stop="toggleFav(p)">{{ p.favorite ? '❤' : '♡' }}</button>
           </div>
           <div class="p-name" :title="p.src_path">{{ p.filename }}</div>
           <div class="p-meta muted">
@@ -114,17 +124,20 @@
         <div class="muted" style="margin-bottom: 8px">
           <template v-if="recycleDelete">
             将把以下 <b>{{ selected.size }}</b> 张照片的源文件移入源图目录下的回收站{{ deleteRaw ? '（含同名 RAW/HEIC 伴生文件）' : '' }}，
-            随后自动打开文件夹——可移回原目录反悔，或自行清空：
+            可移回原目录反悔，或到回收站自行清空：
           </template>
           <template v-else>
             将永久删除以下 <b>{{ selected.size }}</b> 张照片的源文件{{ deleteRaw ? '，并联动删除同名 RAW/HEIC 伴生文件' : '' }}（不可恢复）：
           </template>
         </div>
         <div class="cf-list">
-          <div v-for="p in selectedItems" :key="p.id" class="cf-row">
+          <div v-for="p in selectedItems.slice(0, 200)" :key="p.id" class="cf-row">
             <span class="cf-name">{{ p.filename }}<span v-if="!p.present" class="muted">（源文件已不存在，将跳过）</span></span>
             <span class="cf-score">{{ p.status === 'scored' ? p.score.toFixed(1) + ' 分' : badgeText(p) }}</span>
             <span class="cf-path" :title="p.src_path">{{ p.src_path }}</span>
+          </div>
+          <div v-if="selectedItems.length > 200" class="muted" style="padding: 6px">
+            …共 {{ selectedItems.length }} 张，仅列出前 200 张
           </div>
         </div>
         <div class="row" style="justify-content: flex-end; margin-top: 12px">
@@ -156,6 +169,12 @@ const delResult = ref(null)
 const lowThreshold = ref(5)
 const noReason = ref(false) // 无说明筛选：已评分但没有「不足」文字的照片
 const recycleDelete = ref(true) // 删除→回收站（配置持久化，见 saveRecycleOpt）
+const page = ref(1)
+const pageSize = 100 // 每页渲染的卡片数（全量列表只用于筛选/勾选，DOM 只挂当前页）
+
+const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)))
+const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+function scrollToTop() { window.scrollTo({ top: 0 }) }
 // 阈值步进（±0.5）并夹在 0~10
 function bumpThreshold(d) {
   lowThreshold.value = Math.min(10, Math.max(0, +((lowThreshold.value + d).toFixed(1))))
@@ -195,13 +214,14 @@ async function load() {
       recycleDelete.value = state.config.gallery.recycle_on_delete !== false
     }
     items.value = await api('/api/gallery')
-    applyFilters()
+    applyFilters(false)
   } catch (e) {
     toast(e.message, true)
   }
 }
 
-function applyFilters() {
+// resetPage=false 用于任务完成后的自动刷新：保留用户当前页码（越界才回夹）
+function applyFilters(resetPage = true) {
   let list = items.value
   if (band.value) list = list.filter((p) => bandOf(p) === band.value)
   if (search.value) {
@@ -211,6 +231,8 @@ function applyFilters() {
   if (noReason.value) list = list.filter((p) => p.status === 'scored' && !p.weakness)
   if (onlySelected.value) list = list.filter((p) => selected.value.has(p.id))
   filtered.value = list
+  if (resetPage) page.value = 1
+  else if (page.value > totalPages.value) page.value = totalPages.value
   // 清掉已不在列表中的选择
   const ids = new Set(filtered.value.map((p) => p.id))
   const next = new Set([...selected.value].filter((id) => ids.has(id)))
@@ -221,7 +243,7 @@ watch(() => selected.value.size, () => { if (onlySelected.value) applyFilters() 
 // 挂在图库页时任务在别处跑完 → 自动重载，否则新照片要切一次页面才出现
 watch(() => state.running, (v, old) => { if (old && !v) load() })
 
-const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).length)
+const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value && !p.favorite).length)
 const noReasonCount = computed(() => items.value.filter((p) => p.status === 'scored' && !p.weakness).length)
 const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))
 const confirmOpen = ref(false)
@@ -232,14 +254,25 @@ function toggleSelect(p) {
   else s.add(p.id)
   selected.value = s
 }
+// 标记/取消喜欢（按指纹持久化，重扫重评后标记仍生效）
+async function toggleFav(p) {
+  const on = !p.favorite
+  try {
+    await api('/api/photo/favorite', { method: 'POST', body: JSON.stringify({ id: p.id, on }) })
+    p.favorite = on
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 function selectAll() {
   if (selected.value.size) { selected.value = new Set(); return }
   selected.value = new Set(filtered.value.map((p) => p.id))
 }
 function selectLow() {
-  selected.value = new Set(items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value).map((p) => p.id))
+  // 已标记「喜欢」的照片不参与低分筛选
+  selected.value = new Set(items.value.filter((p) => p.status === 'scored' && p.score < lowThreshold.value && !p.favorite).map((p) => p.id))
   if (!selected.value.size) {
-    toast('没有低于该分数的照片')
+    toast('没有低于该分数的照片（已喜欢的会跳过）')
     return
   }
   band.value = '' // 「只看已选」已覆盖筛选视图，清空分数段避免双重过滤混淆
@@ -377,10 +410,7 @@ async function doDelete() {
     })
     selected.value = new Set()
     confirmOpen.value = false
-    // 回收模式：自动打开回收站文件夹，交给用户决定恢复或清空
-    if (delResult.value.recycled && delResult.value.recycle_dir) {
-      api('/api/open', { method: 'POST', body: JSON.stringify({ path: delResult.value.recycle_dir }) }).catch(() => {})
-    }
+    // 不主动打开文件夹：结果栏留「📂 打开回收站」按钮，由用户自己决定何时查看
     await load()
     refreshState()
   } catch (e) {
@@ -436,6 +466,14 @@ html.dark .thumb-wrap { background: #333; }
   position: absolute; left: 6px; top: 6px; width: 16px; height: 16px; z-index: 2;
   accent-color: var(--danger); cursor: pointer;
 }
+.fav-btn {
+  position: absolute; right: 6px; bottom: 6px; z-index: 2;
+  width: 26px; height: 26px; border: none; border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 14px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.fav-btn:hover { background: rgba(0, 0, 0, 0.65); }
+.fav-btn.on { background: rgba(250, 81, 81, 0.88); }
 .score-badge {
   position: absolute; right: 6px; top: 6px; padding: 2px 8px; border-radius: 999px;
   color: #fff; font-weight: 700; font-size: 13px; background: #888;

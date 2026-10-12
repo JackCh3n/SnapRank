@@ -28,6 +28,10 @@ import (
 	"snaprank/internal/store"
 )
 
+// SessionAll 「所有会话」哨兵值：明细查询不按会话过滤，展示全部记录
+// （与前端目录历史删除用的 __ALL__ 约定一致）
+const SessionAll = "__ALL__"
+
 // Core 应用核心
 type Core struct {
 	cfg      *config.Config
@@ -268,7 +272,9 @@ type PhotoPage struct {
 
 // ListPhotos 明细分页查询（sessionID 为空取最近会话；排序与筛选全部在数据库层完成）
 func (c *Core) ListPhotos(sessionID, status string, page, pageSize int, sortKey, sortDir, model, source, band string) (*PhotoPage, error) {
-	if sessionID == "" {
+	if sessionID == SessionAll {
+		sessionID = "" // 下传空串 = 不按会话过滤，展示所有会话的全部记录
+	} else if sessionID == "" {
 		sess, err := c.st.LastSession()
 		if err != nil {
 			return &PhotoPage{}, nil
@@ -359,6 +365,16 @@ func (c *Core) SetPhotoBucket(id int64, bucket string) error {
 		return fmt.Errorf("非法档位: %s", bucket)
 	}
 	return c.st.SetPhotoBucket(id, bucket)
+}
+
+// SetPhotoFavorite 标记/取消「喜欢」（按内容指纹存储，重扫重评后仍生效；
+// 低分筛选会跳过已标记的照片）
+func (c *Core) SetPhotoFavorite(id int64, on bool) error {
+	p, err := c.st.GetPhoto(id)
+	if err != nil {
+		return err
+	}
+	return c.st.SetFavorite(p.Fingerprint, on)
 }
 
 // Thumb 缩略图响应
@@ -499,8 +515,9 @@ func (c *Core) CleanWorkCache() (int64, error) {
 // GalleryItem 图库条目（跨批次按源文件去重）
 type GalleryItem struct {
 	*store.Photo
-	Present     bool     `json:"present"`                // 源文件是否还在
-	RawSiblings []string `json:"raw_siblings,omitempty"` // 同名 RAW/HEIC 伴生文件
+	Present     bool     `json:"present"`                  // 源文件是否还在
+	Favorite    bool     `json:"favorite,omitempty"`       // 已标记「喜欢」（按指纹，低分筛选会跳过）
+	RawSiblings []string `json:"raw_siblings,omitempty"`   // 同名 RAW/HEIC 伴生文件
 }
 
 var rawSiblingExts = []string{".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
@@ -513,12 +530,18 @@ func (c *Core) Gallery() ([]*GalleryItem, error) {
 	if err != nil {
 		return nil, err
 	}
+	favSet := map[string]bool{}
+	if favs, ferr := c.st.FavoriteFingerprints(); ferr == nil {
+		for _, f := range favs {
+			favSet[f] = true
+		}
+	}
 	out := make([]*GalleryItem, 0, len(photos))
 	for _, p := range photos {
 		if p.Status == store.StatusUnsupported {
 			continue
 		}
-		it := &GalleryItem{Photo: p}
+		it := &GalleryItem{Photo: p, Favorite: favSet[p.Fingerprint]}
 		if st, err := os.Stat(p.SrcPath); err == nil {
 			it.Present = true
 			it.Size = st.Size()
