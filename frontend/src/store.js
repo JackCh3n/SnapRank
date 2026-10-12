@@ -216,7 +216,9 @@ export function connectSSE() {
     const t = taskOf(d.session_id)
     if (t) { t.finished = true; t.stopped = !!d.stopped }
     state.lastDone = { stopped: !!d.stopped, session: d.session_id }
-    refreshState()
+    // 不在此处 refreshState：done 与下一个任务的 queue 事件之间有一个引擎复位间隙，
+    // 拉取到的 running=false 会覆盖随后到达的实时队列事件（推/拉竞态），
+    // 导致下一个任务明明在跑前端却显示「本轮已评完」。队列状态只信 SSE 事件流。
     if (d.stopped) {
       toast('已停止：未评完的图片下次开始时自动继续')
       notifyDesktop('SnapRank 评分已停止', '未评完的图片下次继续')

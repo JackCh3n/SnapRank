@@ -118,7 +118,7 @@
           <input style="width: 320px" v-model="archiveRoot" />
         </label>
         <button class="btn" :disabled="archiving || state.running" @click="doArchive">执行归档</button>
-        <button class="btn plain" v-if="summary.archive_dir" @click="openFolder">打开归档目录</button>
+        <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || summary.archive_dir" @click="openFolder">打开归档目录</button>
       </div>
       <div v-if="archiveResult" class="muted" style="margin-top: 8px">
         ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }} →
