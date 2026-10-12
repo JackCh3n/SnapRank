@@ -764,6 +764,26 @@ func (s *Store) ScoredPhotos(sessionID string) ([]*Photo, error) {
 	return list, rows.Err()
 }
 
+// ScoredPhotosAll 全部会话的已评分照片（复核页合并视图的本地重算用）
+func (s *Store) ScoredPhotosAll() ([]*Photo, error) {
+	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos WHERE status IN (?,?) ORDER BY score DESC`,
+		StatusScored, StatusParseFail)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+
 // FailedPhotos 会话内失败类明细（bad_image/unsupported/failed/duplicate）
 func (s *Store) FailedPhotos(sessionID string) ([]*Photo, error) {
 	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos WHERE session_id=? AND status IN (?,?,?,?) ORDER BY id`,

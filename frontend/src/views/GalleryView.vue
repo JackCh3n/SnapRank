@@ -83,13 +83,6 @@
 
     <div class="card" v-if="filtered.length">
       <!-- 分页渲染：全量列表只做筛选/勾选/弹窗导航，DOM 只挂当前页（图片多时不卡） -->
-      <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 10px">
-        <span class="muted">筛选结果 {{ filtered.length }} 张 · 第 {{ page }} / {{ totalPages }} 页</span>
-        <span class="row" style="gap: 8px; align-items: center">
-          <button class="btn plain small" :disabled="page <= 1" @click="page--; scrollToTop()">上一页</button>
-          <button class="btn plain small" :disabled="page >= totalPages" @click="page++; scrollToTop()">下一页</button>
-        </span>
-      </div>
       <div class="photo-grid">
         <div v-for="p in paged" :key="p.id" class="photo-card" :class="{ selected: selected.has(p.id) }"
           @click="preview = p" title="点击查看大图；勾选左上角选择框进行批量操作">
@@ -108,6 +101,26 @@
             <span>{{ (p.size / 1048576).toFixed(1) }} MB</span>
           </div>
         </div>
+      </div>
+      <!-- 分页器（底部）：←/→ 翻页、Home/End 首尾页、PageUp/PageDown 同向 -->
+      <div class="row" style="justify-content: space-between; align-items: center; margin-top: 12px">
+        <span class="muted">筛选结果 {{ filtered.length }} 张 · 第 {{ page }} / {{ totalPages }} 页</span>
+        <span class="row" style="gap: 6px; align-items: center">
+          <label class="row" style="gap: 4px; align-items: center; font-size: 12px" title="每页显示的卡片数">
+            每页
+            <select v-model.number="pageSize" @change="onPageSizeChange" style="width: 64px">
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+              <option :value="200">200</option>
+              <option :value="500">500</option>
+            </select>
+            条
+          </label>
+          <button class="btn plain small" :disabled="page <= 1" title="首页（Home）" @click="goPage(1)">« 首页</button>
+          <button class="btn plain small" :disabled="page <= 1" title="上一页（← / PageUp）" @click="goPage(page - 1)">‹ 上一页</button>
+          <button class="btn plain small" :disabled="page >= totalPages" title="下一页（→ / PageDown）" @click="goPage(page + 1)">下一页 ›</button>
+          <button class="btn plain small" :disabled="page >= totalPages" title="尾页（End）" @click="goPage(totalPages)">尾页 »</button>
+        </span>
       </div>
     </div>
     <div class="card" v-else><span class="muted">没有照片：先到「运行」页完成一次评分，或调整筛选</span></div>
@@ -170,10 +183,19 @@ const lowThreshold = ref(5)
 const noReason = ref(false) // 无说明筛选：已评分但没有「不足」文字的照片
 const recycleDelete = ref(true) // 删除→回收站（配置持久化，见 saveRecycleOpt）
 const page = ref(1)
-const pageSize = 100 // 每页渲染的卡片数（全量列表只用于筛选/勾选，DOM 只挂当前页）
+// 每页条数（localStorage 持久化；改完回第 1 页）
+const pageSize = ref(Math.min(500, Math.max(50, +(localStorage.getItem('sr_gallery_pagesize') || 100) || 100)))
+function onPageSizeChange() {
+  localStorage.setItem('sr_gallery_pagesize', String(pageSize.value))
+  page.value = 1
+}
 
-const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)))
-const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+const totalPages = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
+const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+function goPage(p) {
+  page.value = Math.min(Math.max(1, p), totalPages.value)
+  scrollToTop()
+}
 function scrollToTop() { window.scrollTo({ top: 0 }) }
 // 阈值步进（±0.5）并夹在 0~10
 function bumpThreshold(d) {
@@ -433,6 +455,24 @@ function onKey(e) {
   if (e.key === 'a' && (e.ctrlKey || e.metaKey) && state.page === 'gallery') {
     e.preventDefault()
     selectAll()
+    return
+  }
+  if (state.page !== 'gallery') return
+  // 键盘翻页：输入控件聚焦（搜索框/选择器）或照片弹窗打开时不响应
+  const tag = (e.target && e.target.tagName) || ''
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || preview.value) return
+  const keys = { ArrowLeft: -1, PageUp: -1, ArrowRight: 1, PageDown: 1 }
+  if (e.key in keys) {
+    if ((keys[e.key] < 0 && page.value > 1) || (keys[e.key] > 0 && page.value < totalPages.value)) {
+      e.preventDefault()
+      goPage(page.value + keys[e.key])
+    }
+  } else if (e.key === 'Home' && page.value > 1) {
+    e.preventDefault()
+    goPage(1)
+  } else if (e.key === 'End' && page.value < totalPages.value) {
+    e.preventDefault()
+    goPage(totalPages.value)
   }
 }
 onMounted(() => {

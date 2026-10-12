@@ -28,9 +28,7 @@ import (
 	"snaprank/internal/store"
 )
 
-// SessionAll 「所有会话」哨兵值：明细查询不按会话过滤，展示全部记录
-// （与前端目录历史删除用的 __ALL__ 约定一致）
-const SessionAll = "__ALL__"
+// SessionAll 已移至 pipeline 包（明细与复核共用）；core 侧直接引用 pipeline.SessionAll
 
 // Core 应用核心
 type Core struct {
@@ -272,7 +270,7 @@ type PhotoPage struct {
 
 // ListPhotos 明细分页查询（sessionID 为空取最近会话；排序与筛选全部在数据库层完成）
 func (c *Core) ListPhotos(sessionID, status string, page, pageSize int, sortKey, sortDir, model, source, band string) (*PhotoPage, error) {
-	if sessionID == SessionAll {
+	if sessionID == pipeline.SessionAll {
 		sessionID = "" // 下传空串 = 不按会话过滤，展示所有会话的全部记录
 	} else if sessionID == "" {
 		sess, err := c.st.LastSession()

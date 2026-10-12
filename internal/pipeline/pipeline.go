@@ -32,6 +32,9 @@ const (
 	EstOutTokens = 350
 )
 
+// SessionAll 「所有会话/全部」哨兵值：明细与复核的合并视图用（与前端约定一致）
+const SessionAll = "__ALL__"
+
 // RecycleDirName 图库删除回收站目录名（建在源图目录下；Scan 跳过该目录，避免重扫进评分流程）
 const RecycleDirName = "SnapRank_回收站"
 
@@ -561,11 +564,8 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 
 // RescoreAllFailed 一键重试当前会话全部失败照片（解析失败 + 调用失败）
 func (e *Engine) RescoreAllFailed() (string, int, error) {
-	sess, err := e.resolveSession("")
-	if err != nil {
-		return "", 0, err
-	}
-	photos, _, err := e.store.ListPhotos(sess.ID, "", 0, 1<<20, "", "", "", "", -1, -1)
+	// 合并视图：收集全部会话的失败照片（ListPhotos 空会话 = 不按会话过滤）
+	photos, _, err := e.store.ListPhotos("", "", 0, 1<<20, "", "", "", "", -1, -1)
 	if err != nil {
 		return "", 0, err
 	}
@@ -1062,11 +1062,48 @@ func (e *Engine) Archive(mode archive.Mode, sessionID string) (*ArchiveSummary, 
 	if !archive.ValidMode(mode) {
 		return nil, fmt.Errorf("非法归档方式: %s", mode)
 	}
+	// 合并视图：归档全部批次中未归档的评分照片（各批次仍落到各自的 <批次ID>/ 目录）
+	if sessionID == SessionAll {
+		return e.archiveAll(mode)
+	}
 	sess, err := e.resolveSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	photos, err := e.store.ScoredPhotos(sess.ID)
+	return e.archiveOne(mode, sess.ID)
+}
+
+// archiveAll 聚合全部会话的归档结果；没有评分照片的会话跳过
+func (e *Engine) archiveAll(mode archive.Mode) (*ArchiveSummary, error) {
+	list, err := e.store.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	agg := &ArchiveSummary{Mode: string(mode), Buckets: map[string]int{}, Dir: e.cfgFn().Paths.ArchiveRoot}
+	archived := 0
+	for _, sess := range list {
+		sum, err := e.archiveOne(mode, sess.ID)
+		if err != nil {
+			continue // 该会话没有可归档的评分结果
+		}
+		archived++
+		agg.Placed += sum.Placed
+		agg.Skipped += sum.Skipped
+		agg.Failed += sum.Failed
+		agg.Errors = append(agg.Errors, sum.Errors...)
+		for b, n := range sum.Buckets {
+			agg.Buckets[b] += n
+		}
+	}
+	if archived == 0 {
+		return nil, errors.New("没有可归档的评分结果")
+	}
+	return agg, nil
+}
+
+// archiveOne 归档单个会话（报告 CSV 写在各自 <归档根>/<批次ID>/ 下）
+func (e *Engine) archiveOne(mode archive.Mode, sessID string) (*ArchiveSummary, error) {
+	photos, err := e.store.ScoredPhotos(sessID)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,12 +1111,12 @@ func (e *Engine) Archive(mode archive.Mode, sessionID string) (*ArchiveSummary, 
 		return nil, errors.New("该会话没有可归档的评分结果")
 	}
 	cfg := e.cfgFn()
-	sessionDir := filepath.Join(cfg.Paths.ArchiveRoot, sess.ID)
+	sessionDir := filepath.Join(cfg.Paths.ArchiveRoot, sessID)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return nil, err
 	}
 
-	sum := &ArchiveSummary{SessionID: sess.ID, Mode: string(mode), Buckets: map[string]int{}, Dir: sessionDir}
+	sum := &ArchiveSummary{SessionID: sessID, Mode: string(mode), Buckets: map[string]int{}, Dir: sessionDir}
 	var rows []*archive.ReportRow
 	for _, p := range photos {
 		bucket := scorer.BucketOf(p.Score, p.Status == store.StatusParseFail, cfg.Score.Thresholds, p.OverrideBucket)
@@ -1123,7 +1160,7 @@ func (e *Engine) Archive(mode archive.Mode, sessionID string) (*ArchiveSummary, 
 		rows = append(rows, toRow(p, bucket))
 	}
 	// 失败类照片仅进报告（文件留在原目录）
-	if failedList, ferr := e.store.FailedPhotos(sess.ID); ferr == nil {
+	if failedList, ferr := e.store.FailedPhotos(sessID); ferr == nil {
 		for _, p := range failedList {
 			rows = append(rows, toRow(p, ""))
 		}
@@ -1202,6 +1239,18 @@ func (e *Engine) GetSummary(sessionID string) (*Summary, error) {
 // Recalculate 权重变更后基于已存维度分本地重算总分（0 API 成本）；sessionID 为空取最近会话
 func (e *Engine) Recalculate(sessionID string) (int, error) {
 	cfg := e.cfgFn()
+	// 合并视图：跨全部会话本地重算（0 API 成本）
+	if sessionID == SessionAll {
+		photos, err := e.store.ScoredPhotosAll()
+		if err != nil {
+			return 0, err
+		}
+		scores := scorer.RecomputeAll(photos, cfg.WeightsNormalized())
+		if err := e.store.UpdateScoresLocal(scores); err != nil {
+			return 0, err
+		}
+		return len(scores), nil
+	}
 	sess, err := e.resolveSession(sessionID)
 	if err != nil {
 		return 0, nil

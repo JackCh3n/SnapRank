@@ -1,17 +1,13 @@
 <template>
   <div class="grid">
-    <!-- 分布统计 -->
+    <!-- 分布统计（全部图片合并视图） -->
     <div class="card">
       <div class="head">
-        <h3 class="title">批次分布</h3>
-        <select v-model="sessionID" @change="onSessionChange" class="session-sel" title="切换历史会话">
-          <option v-for="s in sessions" :key="s.id" :value="s.id">{{ s.name || s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）</option>
-        </select>
-        <button class="btn plain small" @click="showManager = true">⚙ 管理</button>
+        <h3 class="title">评分分布 <span class="muted">（所有图片）</span></h3>
+        <button class="btn plain small" @click="showManager = true">⚙ 管理批次</button>
         <div class="muted" v-if="summary">
-          均分 <b>{{ summary.avg_score.toFixed(1) }}</b> · 最高 <b>{{ summary.max_score.toFixed(1) }}</b> ·
-          预估费用 ¥{{ summary.est_cost.toFixed(3) }}
-          <span v-if="summary.archived" class="tag">已归档</span>
+          共 <b>{{ totalScored }}</b> 张 · 均分 <b>{{ summary.avg.toFixed(1) }}</b> · 最高 <b>{{ summary.max.toFixed(1) }}</b>
+          <span v-if="allArchived" class="tag">已全部归档</span>
         </div>
       </div>
       <div v-if="buckets.length" class="bars">
@@ -48,13 +44,13 @@
     <!-- 照片网格 -->
     <div class="card" v-if="photos.length">
       <h3 class="title">评分复核 <span class="muted">（可在下拉中手动调档）</span>
-        <select v-model="scope" @change="loadPhotos" class="scope-sel">
+        <select v-model="scope" @change="onScopeChange" class="scope-sel">
           <option value="scored">已评分照片</option>
           <option value="all">全部照片（含失败/待处理）</option>
         </select>
       </h3>
       <div class="photo-grid">
-        <div v-for="p in photos" :key="p.id" class="photo-card">
+        <div v-for="p in paged" :key="p.id" class="photo-card">
           <div class="thumb-wrap clickable" :class="{ 'parse-fail': p.status === 'parse_fail' }"
             @click="preview = p" title="点击查看大图与评分详情">
             <img v-if="!p._noThumb" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" loading="lazy" @error="thumbFail(p)" />
@@ -83,6 +79,26 @@
               @click="rescoreOne(p)">↻ 复检</button>
           </div>
         </div>
+      </div>
+      <!-- 分页器（底部） -->
+      <div class="row" style="justify-content: space-between; align-items: center; margin-top: 12px">
+        <span class="muted">共 {{ photos.length }} 张 · 第 {{ page }} / {{ totalPages }} 页</span>
+        <span class="row" style="gap: 6px; align-items: center">
+          <label class="row" style="gap: 4px; align-items: center; font-size: 12px" title="每页显示的卡片数">
+            每页
+            <select v-model.number="pageSize" @change="page = 1" style="width: 64px">
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+              <option :value="200">200</option>
+              <option :value="500">500</option>
+            </select>
+            条
+          </label>
+          <button class="btn plain small" :disabled="page <= 1" @click="goPage(1)">« 首页</button>
+          <button class="btn plain small" :disabled="page <= 1" @click="goPage(page - 1)">‹ 上一页</button>
+          <button class="btn plain small" :disabled="page >= totalPages" @click="goPage(page + 1)">下一页 ›</button>
+          <button class="btn plain small" :disabled="page >= totalPages" @click="goPage(totalPages)">尾页 »</button>
+        </span>
       </div>
     </div>
 
@@ -120,13 +136,13 @@
       @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" />
 
     <!-- 批次管理弹窗 -->
-    <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"
+    <SessionManager v-if="showManager" :sessions="sessions" :current="''"
       @close="showManager = false" @changed="onSessionsChanged" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { state, api, toast, markForced, rescorePhotos } from '../store.js'
 import { confirmDialog } from '../confirm.js'
 import PhotoModal from '../components/PhotoModal.vue'
@@ -138,45 +154,53 @@ const bucketColors = ['#07c160', '#10aeff', '#ffa300', '#888888', '#fa5151']
 const w = ref({ technique: 0.4, composition: 0.3, content: 0.2, color: 0.1 })
 const mode = ref('copy')
 const archiveRoot = ref('')
-const photos = ref([])
-const summary = computed(() => state.summary)
+const allItems = ref([]) // 全部图片（/api/gallery 按源文件去重，合并视图）
+const photos = ref([]) // 按范围筛选后的列表
 const recalcing = ref(false)
 const archiving = ref(false)
 const archiveResult = ref(null)
 const preview = ref(null)
-const sessionID = ref('')
 const sessions = ref([])
 const showManager = ref(false)
+const scope = ref('scored')
 
-// 批次管理变更后：刷新列表；当前查看的批次被删则回落到最新
+// 分页（图片多时不卡：DOM 只挂当前页）
+const page = ref(1)
+const pageSize = ref(Math.min(500, Math.max(50, +(localStorage.getItem('sr_review_pagesize') || 100) || 100)))
+watch(pageSize, (v) => { localStorage.setItem('sr_review_pagesize', String(v)); page.value = 1 })
+const totalPages = computed(() => Math.max(1, Math.ceil(photos.value.length / pageSize.value)))
+const paged = computed(() => photos.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+function goPage(p) {
+  page.value = Math.min(Math.max(1, p), totalPages.value)
+  window.scrollTo({ top: 0 })
+}
+
+// 批次管理变更后刷新合并视图
 async function onSessionsChanged() {
   await loadSessions()
-  if (!sessions.value.find((x) => x.id === sessionID.value)) {
-    sessionID.value = sessions.value.length ? sessions.value[0].id : ''
-  }
-  await Promise.all([loadSummary(), loadPhotos()])
-}
-
-function shortDir(d) {
-  if (!d) return ''
-  const parts = d.split(/[\\/]+/).filter(Boolean)
-  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : d
-}
-
-async function onSessionChange() {
-  await Promise.all([loadSummary(), loadPhotos()])
-}
-
-async function loadSummary() {
-  const r = await api(`/api/summary?session=${sessionID.value}`).catch(() => null)
-  state.summary = r
+  await loadAll()
 }
 
 async function loadSessions() {
   try {
     sessions.value = await api('/api/sessions')
-    if (!sessionID.value && sessions.value.length) sessionID.value = sessions.value[0].id
   } catch { /* 无会话 */ }
+}
+
+// 合并视图数据源：图库接口（按源文件去重、含调档/维度/说明字段）
+async function loadAll() {
+  try {
+    allItems.value = await api('/api/gallery')
+  } catch { /* 尚无会话 */ }
+  applyScope()
+}
+function applyScope() {
+  let list = allItems.value
+  if (scope.value === 'scored') {
+    list = list.filter((p) => p.status === 'scored' || p.status === 'parse_fail')
+  }
+  photos.value = list
+  if (page.value > totalPages.value) page.value = totalPages.value
 }
 
 // 弹窗评分明细行：维度分 + 归一化权重
@@ -191,20 +215,27 @@ function dimRows(p) {
   ]
 }
 
-const totalScored = computed(() => {
-  const s = summary.value
-  if (!s || !s.status) return 0
-  return (s.status.scored || 0) + (s.status.parse_fail || 0)
+// 合并视图汇总：从全部图片客户端计算（分布/均分/失败数随调档实时更新）
+const summary = computed(() => {
+  const scored = allItems.value.filter((p) => p.status === 'scored')
+  if (!scored.length) return null
+  let total = 0, max = 0
+  for (const p of scored) {
+    total += p.score
+    if (p.score > max) max = p.score
+  }
+  return { avg: total / scored.length, max }
+})
+const allArchived = computed(() => {
+  const scored = allItems.value.filter((p) => p.status === 'scored')
+  return scored.length > 0 && scored.every((p) => p.archived_path)
 })
 
-const parseFailCount = computed(() => {
-  const s = summary.value
-  return (s && s.status && s.status.parse_fail) || 0
-})
-const failedCount = computed(() => {
-  const s = summary.value
-  return (s && s.status && s.status.failed) || 0
-})
+const totalScored = computed(() =>
+  allItems.value.filter((p) => p.status === 'scored' || p.status === 'parse_fail').length)
+
+const parseFailCount = computed(() => allItems.value.filter((p) => p.status === 'parse_fail').length)
+const failedCount = computed(() => allItems.value.filter((p) => p.status === 'failed').length)
 const failTotal = computed(() => parseFailCount.value + failedCount.value)
 const failDetail = computed(() => {
   const p = parseFailCount.value, f = failedCount.value
@@ -215,19 +246,17 @@ const failDetail = computed(() => {
 
 function closePreview() {
   preview.value = null
-  // 复检可能已改变评分，关闭时刷新汇总
-  api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
+  loadAll() // 复检可能已改变评分，关闭时刷新合并视图
 }
 
 function onNavigate(newPhoto) {
   preview.value = newPhoto
 }
 
-// 弹窗内删除了源文件：从列表移除并刷新汇总
+// 弹窗内删除了源文件：从合并视图移除并刷新汇总
 function onPhotoDeleted(p) {
-  photos.value = photos.value.filter((x) => x.id !== p.id)
   preview.value = null
-  api('/api/state').then((r) => { state.summary = r.summary }).catch(() => {})
+  loadAll()
 }
 
 async function rescoreOne(p) {
@@ -247,17 +276,22 @@ async function rescoreAllFailed() {
     const failed = photos.value.filter((x) => x.status === 'parse_fail' || x.status === 'failed')
     markForced(r.session_id, failed.map((x) => x.filename))
     toast(`已提交 ${r.count} 张失败重试`)
-    setTimeout(() => { onSessionChange() }, 1500) // 重试完成后刷新
+    setTimeout(() => { loadAll() }, 1500) // 重试完成后刷新
   } catch (e) {
     toast(e.message, true)
   }
 }
 
+// 分布柱状图：按当前权重/调档实时计算（手动调档优先，与后端 BucketOf 口径一致）
 const buckets = computed(() => {
-  const s = summary.value
-  if (!s || !s.buckets) return []
+  const counts = {}
+  for (const p of allItems.value) {
+    if (p.status !== 'scored' && p.status !== 'parse_fail') continue
+    const b = p.override_bucket || autoBucket(p)
+    counts[b] = (counts[b] || 0) + 1
+  }
   return bucketNames
-    .map((name, i) => ({ name, count: s.buckets[name] || 0, color: bucketColors[i] }))
+    .map((name, i) => ({ name, count: counts[name] || 0, color: bucketColors[i] }))
     .filter((b) => b.count > 0)
 })
 
@@ -286,8 +320,6 @@ function thumbFail(p) { p._noThumb = true }
 
 // 缓存命中但无压缩图的照片（老批次）正常参与列表展示
 
-const scope = ref('scored')
-
 function badgeText(p) {
   if (p.status === 'parse_fail') return '复检'
   if (p.status === 'scored') return p.score.toFixed(1)
@@ -298,15 +330,9 @@ function badgeClass(p) {
   return 'bad'
 }
 
-async function loadPhotos() {
-  try {
-    const r = await api(`/api/photos?page=1&page_size=500&session=${sessionID.value}`)
-    let list = r.items || []
-    if (scope.value === 'scored') {
-      list = list.filter((p) => p.status === 'scored' || p.status === 'parse_fail')
-    }
-    photos.value = list
-  } catch { /* 尚无会话 */ }
+function onScopeChange() {
+  applyScope()
+  page.value = 1
 }
 
 async function saveAndRecalc() {
@@ -319,9 +345,9 @@ async function saveAndRecalc() {
         technique: +w.value.technique, composition: +w.value.composition,
         content: +w.value.content, color: +w.value.color } }),
     })
-    const r = await api('/api/recalculate', { method: 'POST', body: JSON.stringify({ session: sessionID.value }) })
+    const r = await api('/api/recalculate', { method: 'POST', body: JSON.stringify({ session: '__ALL__' }) })
     toast(`已按新权重重算 ${r.recalculated} 张`)
-    await loadPhotos()
+    await loadAll()
   } catch (e) {
     toast(e.message, true)
   }
@@ -345,7 +371,7 @@ async function doArchive() {
     if (archiveRoot.value && archiveRoot.value !== state.config.paths.archive_root) {
       await api('/api/config', { method: 'POST', body: JSON.stringify({ paths: { ...state.config.paths, archive_root: archiveRoot.value } }) })
     }
-    archiveResult.value = await api('/api/archive', { method: 'POST', body: JSON.stringify({ mode: mode.value, session: sessionID.value }) })
+    archiveResult.value = await api('/api/archive', { method: 'POST', body: JSON.stringify({ mode: mode.value, session: '__ALL__' }) })
     toast('归档完成')
   } catch (e) {
     toast(e.message, true)
@@ -367,7 +393,7 @@ onMounted(async () => {
     archiveRoot.value = r.config.paths.archive_root
   }
   await loadSessions()
-  await Promise.all([loadSummary(), loadPhotos()])
+  await loadAll()
 })
 </script>
 

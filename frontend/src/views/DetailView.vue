@@ -3,15 +3,10 @@
     <div class="card">
       <div class="row" style="justify-content: space-between">
         <div class="row">
-          <label class="field">
-            会话
-            <select v-model="sessionID" @change="load(1)">
-              <option value="__ALL__">📋 所有会话（全部记录）</option>
-              <option v-for="s in sessions" :key="s.id" :value="s.id">
-                {{ s.name || s.id }}（{{ shortDir(s.source_dir) }}，{{ s.done || 0 }} 张）
-              </option>
-            </select>
-          </label>
+          <span class="field row" style="flex-direction: row; align-items: center; gap: 6px"
+            title="展示所有批次的全部记录（含同一张图在不同批次的重复记录）">
+            <b>📋 所有会话</b>
+          </span>
           <button class="btn plain small" @click="showManager = true">⚙ 管理批次</button>
           <label class="field">
             状态
@@ -63,7 +58,7 @@
         <thead>
           <tr>
             <th>缩略</th><th>文件名</th>
-            <th v-if="isAllSessions" class="clip" title="记录所属批次">批次</th>
+            <th class="clip" title="记录所属批次">批次</th>
             <th>状态</th>
             <th class="sortable" @click="toggleSort('score')">总分 {{ arrow('score') }}</th>
             <th class="sortable" @click="toggleSort('technique')">技 {{ arrow('technique') }}</th>
@@ -78,7 +73,7 @@
             <td><img v-if="p.compressed_path" :src="`/api/thumb?id=${p.id}&v=${(p.fingerprint || '').slice(0, 12)}`" class="mini clickable"
               loading="lazy" @click="preview = p" title="点击查看大图" /></td>
             <td class="clip" :title="p.src_path">{{ p.filename }}</td>
-            <td v-if="isAllSessions" class="clip" :title="p.session_id">{{ sessionLabel(p.session_id) }}</td>
+            <td class="clip" :title="p.session_id">{{ sessionLabel(p.session_id) }}</td>
             <td><span class="tag" :class="{ warn: p.status !== 'scored' }">{{ statusLabel(p.status) }}</span></td>
             <td><b>{{ p.status === 'scored' ? p.score.toFixed(1) : '-' }}</b></td>
             <td>{{ d(p, 'technique') }}</td><td>{{ d(p, 'composition') }}</td>
@@ -126,20 +121,15 @@ const modelFilter = ref('')
 const sourceFilter = ref('')
 const bandFilter = ref('')
 const exportUrl = ref('/api/report/export')
-const sessionID = ref('')
 const sessions = ref([])
 const showManager = ref(false)
 
 async function onSessionsChanged() {
   await loadSessions()
-  if (sessionID.value !== '__ALL__' && !sessions.value.find((x) => x.id === sessionID.value)) {
-    sessionID.value = sessions.value.length ? sessions.value[0].id : ''
-  }
   load(1)
 }
 
-// 「所有会话」模式：不按会话过滤，展示全部批次的所有记录（含跨批次重复）
-const isAllSessions = computed(() => sessionID.value === '__ALL__')
+// 固定「所有会话」视图：不按会话过滤，展示全部批次的所有记录（含跨批次重复）
 // 批次列短标签：有备注用备注，否则取会话 ID 尾部随机段（悬停可见完整 ID）
 function sessionLabel(id) {
   const s = sessions.value.find((x) => x.id === id)
@@ -231,7 +221,7 @@ function d(p, k) {
 async function load(pg) {
   page.value = pg || page.value
   const qs = new URLSearchParams({
-    page: page.value, page_size: pageSize, status: status.value, session: sessionID.value,
+    page: page.value, page_size: pageSize, status: status.value, session: '__ALL__',
     sort: sortKey.value, order: sortAsc.value ? 'asc' : 'desc',
     model: modelFilter.value, source: sourceFilter.value, band: bandFilter.value,
   })
@@ -244,7 +234,6 @@ async function load(pg) {
 async function loadSessions() {
   try {
     sessions.value = await api('/api/sessions')
-    if (!sessionID.value && sessions.value.length) sessionID.value = sessions.value[0].id
   } catch { /* 无会话 */ }
 }
 
