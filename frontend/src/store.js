@@ -13,6 +13,7 @@ export const state = reactive({
   running: false,              // 是否有正在执行的任务
   session: '',                 // 当前运行中的会话
   queue: { current: '', queued: [] }, // 任务队列（current=运行中，queued=排队）
+  pools: [],                   // 运行中任务的池状态：压缩池 + 各模型池（进度/速度/暂停/停止）
   summary: null,
   models: { all: [], vision: [] },
   tasks: {},                   // sid -> { progress: [], total: 0, stage: '', startedAt: 0, finished: false }
@@ -122,6 +123,7 @@ export function applyState(s) {
     for (const q of s.queue.queued || []) taskOf(q)
   }
   if (s.summary !== undefined) state.summary = s.summary
+  state.pools = s.pools || [] // 无运行中任务时后端返回 null
 }
 
 export async function refreshState() {
@@ -166,6 +168,10 @@ export function connectSSE() {
     state.queue = JSON.parse(e.data)
     state.running = !!state.queue.current
     if (state.queue.current) state.session = state.queue.current
+  })
+  // 池状态（压缩池 + 各模型池）：每秒推送 + 单池控制/追加模型后即时推送
+  es.addEventListener('pools', (e) => {
+    state.pools = JSON.parse(e.data) || []
   })
   es.addEventListener('stage', (e) => {
     const d = JSON.parse(e.data)

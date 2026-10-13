@@ -31,8 +31,12 @@ var ErrRateLimit = errors.New("rate limited (429)")
 var ErrModelNoVision = errors.New("model does not support image input")
 
 // ErrModelNotFound 模型在当前平台不存在或无权限（404）：批次锁定的模型换了平台后
-// 每张照片都会撞同一堵墙，流水线据此快速失败，不再反复重试整批
+// 每张照片都会撞同一堵墙，流水线据此只停该模型池，不再反复重试整批
 var ErrModelNotFound = errors.New("model not found on current platform")
+
+// ErrQuotaExhausted 额度不足/无权限（402/403，或 429 带欠费/额度文案）：
+// 该模型池已无法继续，只停本池，其它模型池照跑
+var ErrQuotaExhausted = errors.New("quota exhausted or no permission")
 
 // ScoreRequest 单次评分请求
 type ScoreRequest struct {
@@ -181,13 +185,26 @@ func isFormatRelated(err error) bool {
 func classifyErr(err error) error {
 	var apiErr *openai.APIError
 	if errors.As(err, &apiErr) {
+		msg := strings.ToLower(apiErr.Message)
+		quotaWords := strings.Contains(msg, "quota") || strings.Contains(msg, "insufficient") ||
+			strings.Contains(msg, "balance") || strings.Contains(msg, "欠费") || strings.Contains(msg, "余额") ||
+			strings.Contains(msg, "额度") || strings.Contains(msg, "no permission") || strings.Contains(msg, "not authorized")
+		if apiErr.HTTPStatusCode == 402 || apiErr.HTTPStatusCode == 403 {
+			return fmt.Errorf("%w: %s", ErrQuotaExhausted, apiErr.Message)
+		}
 		if apiErr.HTTPStatusCode == 429 {
+			if quotaWords {
+				return fmt.Errorf("%w: %s", ErrQuotaExhausted, apiErr.Message)
+			}
 			return fmt.Errorf("%w: %s", ErrRateLimit, apiErr.Message)
+		}
+		if apiErr.HTTPStatusCode == 401 {
+			return fmt.Errorf("%w: %s", ErrQuotaExhausted, apiErr.Message)
 		}
 		if apiErr.HTTPStatusCode == 400 && (strings.Contains(apiErr.Message, "image") || strings.Contains(apiErr.Message, "多模态") || strings.Contains(apiErr.Message, "vision")) {
 			return fmt.Errorf("%w: %s", ErrModelNoVision, apiErr.Message)
 		}
-		if apiErr.HTTPStatusCode == 404 && strings.Contains(strings.ToLower(apiErr.Message), "model") {
+		if apiErr.HTTPStatusCode == 404 && strings.Contains(msg, "model") {
 			return fmt.Errorf("%w: %s", ErrModelNotFound, apiErr.Message)
 		}
 	}
@@ -413,9 +430,12 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 	if strings.Contains(strings.ToUpper(req.Filename), "BADJSON") {
 		return `哎呀，这张照片感觉 {一般吧}`, nil
 	}
-	// 测试触发器：模型名含 MISSING 时模拟平台「模型不存在」404，用于离线验证快速失败
+	// 测试触发器：模型名含 MISSING/QUOTA 时模拟平台 404 / 额度耗尽，用于离线验证池级隔离
 	if strings.Contains(strings.ToUpper(model), "MISSING") {
 		return "", fmt.Errorf("%w: The model %q does not exist or you do not have access to it.", ErrModelNotFound, model)
+	}
+	if strings.Contains(strings.ToUpper(model), "QUOTA") {
+		return "", fmt.Errorf("%w: insufficient quota, please top up", ErrQuotaExhausted)
 	}
 	h := fnv.New64a()
 	h.Write([]byte(req.ImageB64[:min(2048, len(req.ImageB64))]))

@@ -162,8 +162,8 @@ type Engine struct {
 	running   atomic.Bool
 	cancel    context.CancelFunc
 	sessionID string
-	concScale atomic.Int64 // 429 降速倍率（1=正常，越大退避越久）
-	paused    atomic.Bool  // 暂停标记：跑完当前这张后挂起，恢复后继续（内存态，随任务结束清除）
+	paused    atomic.Bool // 暂停标记：跑完当前这张后挂起，恢复后继续（内存态，随任务结束清除）
+	pools     atomic.Pointer[runPools] // 运行中任务的模型池集合（供单池暂停/停止/追加模型）
 	mu        sync.Mutex
 	queued    []queuedTask // 排队任务（当前任务结束后顺序执行）
 }
@@ -796,7 +796,6 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 	e.sessionID = sessID
 	e.mu.Unlock()
 	e.running.Store(true)
-	e.concScale.Store(1)
 	e.store.SetSessionStatus(sessID, store.SessionRunning)
 	e.publishQueue()
 
@@ -825,6 +824,7 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 			failed += counts[store.StatusParseFail] // 夜间模式目标两类清零
 		}
 		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: failed, Night: opts.Night}})
+		e.Bus.Publish(Event{Type: "pools", Data: []PoolState{}}) // 清空池面板（任务已结束）
 		// 先复位运行态再拉起排队任务：popAndRun 依赖 running=false 才会取任务，
 		// 不能依赖 defer 的复位时机（那要等本 goroutine 返回，队列会永远卡住）
 		e.paused.Store(false) // 暂停标记不跨任务
@@ -1006,51 +1006,97 @@ func (e *Engine) providerForPreset(name string) (provider.Provider, error) {
 	return nil, fmt.Errorf("预设不存在: %s", name)
 }
 
-// streamPools 压缩池与评分池流水并行。评分侧按目标模型分队列：
-// 每个模型（含跨平台）独立消费整份照片清单、各自独立并发——快模型不被
-// 慢模型拖住，各平台限速互不影响；一张照片的全部模型完成后才入正记录
-// 并计进度（合议平均在此时生效）。返回是否被停止。
-// 动态并发窗口保持到各队列「派发完毕」（弹出计数归零）才逐个关闭：
-// 预压缩/缓存命中的批次压缩阶段秒退，若此时立即关队列，运行中调大
-// 并发将永远不生效（worker 只减不增）。
-// 暂停语义：评分 worker 与压缩投料口都在「跑完当前这张后」挂起；
-// 停止语义：ctx 取消后各环节经 select 逃逸，未评分照片留在原状态供续跑。
+// streamPools 压缩池 + n 个模型池并行：压缩池把照片压进内容寻址缓存并推入共享清单，
+// 每个模型池用独立游标消费整份清单、独立并发与生命周期（暂停/停止/额度故障互不影响）。
+// 一张照片在其「投递时活跃的池」都有结果（或该池被停止/致命）后定稿入正记录并计进度；
+// 运行中新增的池从第一张起评（复用压缩缓存，不重新压缩），只并入合议平均、不阻塞定稿。
+// 暂停语义：整任务暂停在投料口与各池取数前挂起；单池暂停只挂起该池。
+// 停止语义：ctx 取消后各环节退出，未评分照片留在原状态供续跑。
+// 返回是否被停止。
 func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets []scoreTarget,
 	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
 
-	// 动态并发：worker 数每秒对齐配置（设置页/运行页调整保存后 1 秒内生效；
-	// 调小则多余 worker 跑完当前这张后退出）
+	ready := newReadyList()
 	scDesired := atomic.Int64{}
 	ccDesired := atomic.Int64{}
-	compressJobs := make(chan *store.Photo) // 无缓冲：投料节奏跟随 worker，动态扩容窗口覆盖整个压缩阶段
-	// 每目标一条队列：压缩产出投给全部模型，各模型独立节奏消费（快模型不等慢模型）
-	targetJobs := make([]chan *store.Photo, len(targets))
-	for i := range targetJobs {
-		targetJobs[i] = make(chan *store.Photo, 64)
-	}
-	doneCount := atomic.Int64{}
-	var stopFlag atomic.Bool
-	var compressWG, targetWG sync.WaitGroup
-	var compressN atomic.Int64
-	targetN := make([]atomic.Int64, len(targets))
-	// 各目标队列「已投递-已弹出」计数：压缩排干后据此判定该模型是否派发完毕，
-	// 排干一个关一个——动态并发窗口保持到派发完毕，中途调大并发立即生效
-	targetPending := make([]atomic.Int64, len(targets))
+	compressJobs := make(chan *store.Photo) // 无缓冲：投料节奏跟随压缩 worker，动态扩容窗口覆盖整个压缩阶段
 
-	// 照片完成度跟踪：全部目标完成 → finalize（主模型入正记录 + 合议 + 进度）
+	var stopFlag atomic.Bool
+	var compressWG sync.WaitGroup
+	var compressN atomic.Int64
+	var compressClosed bool
+	var poolMu sync.Mutex // 保护 compressClosed / 压缩池扩容
+	doneCount := atomic.Int64{}
+
+	rp := &runPools{ready: ready, planned: int64(len(compressQueue))}
+	rp.compress.total.Store(int64(len(compressQueue)))
+	e.pools.Store(rp)
+	defer e.pools.Store(nil)
+
+	// 照片完成度：required = 投递时活跃的池标签（后加的池不阻塞已投递照片定稿）
 	type photoState struct {
-		mu       sync.Mutex
-		outcomes []modelOutcome
-		remain   int
-		start    time.Time
+		mu        sync.Mutex
+		p         *store.Photo
+		outcomes  map[string]modelOutcome
+		required  map[string]bool
+		finalized bool
+		start     time.Time
 	}
 	var statesMu sync.Mutex
 	states := map[int64]*photoState{}
 
-	finalize := func(p *store.Photo, st *photoState) {
+	// poolByLabel 查池（锁序：持 st.mu 时可取 rp.mu，反向禁止）
+	poolByLabel := func(label string) *modelPool {
+		rp.mu.Lock()
+		defer rp.mu.Unlock()
+		for _, p := range rp.pools {
+			if p.label == label {
+				return p
+			}
+		}
+		return nil
+	}
+	// satisfied 该照片要求的池是否都已满足（有结果，或池已停止/致命）——需持 st.mu
+	satisfied := func(st *photoState) bool {
+		for label := range st.required {
+			if _, ok := st.outcomes[label]; ok {
+				continue
+			}
+			if p := poolByLabel(label); p != nil && p.halted() {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+
+	// finalize 定稿：主池结果优先入正记录，主池缺席（停止/失败）时用任一可用结果
+	finalize := func(st *photoState) {
+		p := st.p
 		idx := doneCount.Add(1)
-		primary := st.outcomes[0]
 		cfg := e.cfgFn()
+		var primary modelOutcome
+		label := ""
+		ok := false
+		if o, has := st.outcomes[rp.primaryLabel]; has {
+			primary, label, ok = o, rp.primaryLabel, true
+		}
+		if !ok {
+			for l, o := range st.outcomes {
+				if o.status == store.StatusScored {
+					primary, label, ok = o, l, true
+					break
+				}
+				if !ok {
+					primary, label, ok = o, l, true
+				}
+			}
+		}
+		if !ok {
+			e.store.SetPhotoStatus(p.ID, store.StatusFailed, "所有模型池均未产出评分（池被停止或调用失败），可重跑")
+			e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, Index: int(idx), Total: totalAll, File: p.Filename, Status: store.StatusFailed, Error: "所有模型池均未产出评分"}})
+			return
+		}
 		switch primary.status {
 		case store.StatusScored:
 			score := scorer.WeightedScore(*primary.dims, cfg.WeightsNormalized())
@@ -1058,14 +1104,14 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 			if primary.cached {
 				src = "cache"
 			}
-			e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, targets[0].label, scorer.PromptVersion, src, primary.clamped, time.Since(st.start).Milliseconds())
+			e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, label, scorer.PromptVersion, src, primary.clamped, time.Since(st.start).Milliseconds())
 			// 合议模式：正式分 = 各模型最新评分的平均（覆盖主模型分数）
 			if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
 				score = agg
 			}
 			e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, Index: int(idx), Total: totalAll, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}})
 		case store.StatusParseFail:
-			e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", targets[0].label, scorer.PromptVersion, "api", false, time.Since(st.start).Milliseconds())
+			e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", label, scorer.PromptVersion, "api", false, time.Since(st.start).Milliseconds())
 			e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(primary.errDetail, 500))
 			e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, Index: int(idx), Total: totalAll, File: p.Filename, Status: store.StatusParseFail, Error: truncate(primary.errDetail, 200)}})
 		case store.StatusBadImage:
@@ -1077,56 +1123,107 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 		}
 	}
 
-	// 致命错误（批次锁定模型在当前平台不存在）：中止本批次但保留排队任务
-	// （后续批次可能锁定的是别的模型，仍应继续跑）；只上报一次
-	var fatalOnce sync.Once
-	fatalAbort := func(reason string) {
-		fatalOnce.Do(func() {
-			logutil.Error("%s", reason)
-			e.abortTask(reason)
-		})
-	}
-
-	// 目标模型 worker：独立消费本模型队列，waitIfPaused 同时承担取消判断
-	spawnTarget := func(ti int) {
-		targetN[ti].Add(1)
-		targetWG.Add(1)
+	// spawnPoolLocked 起一个池 worker（需持 rp.mu）：与收尾判定（同持 rp.mu）互斥，
+	// 保证刚追加的池不会被漏算成 0 worker。返回 false 表示任务已收尾。
+	spawnPoolLocked := func(pool *modelPool) bool {
+		if rp.closed {
+			return false
+		}
+		pool.workers.Add(1) // 先计数再起 goroutine
 		go func() {
-			defer targetWG.Done()
-			defer targetN[ti].Add(-1)
-			tg := targets[ti]
-			for p := range targetJobs[ti] {
-				targetPending[ti].Add(-1) // 弹出即减：收尾据此判定该模型派发完毕
-				if !e.waitIfPaused(ctx) {
-					stopFlag.Store(true)
+			defer pool.workers.Add(-1)
+			for {
+				if ctx.Err() != nil || pool.stopped.Load() || pool.fatal.Load() {
+					return
+				}
+				// 清单取尽即退出（暂停中也退出，避免任务永远等不到收尾）
+				if ready.finished() && int(pool.cursor.Load()) >= ready.size() {
+					pool.endAt.Store(time.Now().UnixNano())
+					return
+				}
+				if pool.paused.Load() {
+					time.Sleep(200 * time.Millisecond)
 					continue
 				}
+				i := int(pool.cursor.Add(1) - 1)
+				p, ok := ready.at(ctx, i, &pool.stopped)
+				if !ok {
+					return
+				}
+				pool.inflight.Add(1)
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				o := e.scoreModel(ctx, tg.prov, tg.model, tg.label, p, cp)
+				o := e.scoreModel(ctx, pool, p, cp)
+				pool.inflight.Add(-1)
+				if o.status == store.StatusScored {
+					pool.consec.Store(0)
+				} else {
+					pool.consec.Add(1)
+				}
 				if o.fatal {
-					fatalAbort(fmt.Sprintf("批次锁定的模型 %s 在当前平台不可用，已中止本批次（其余排队任务不受影响）：%s", tg.model, o.errDetail))
+					pool.failFatal(o.errDetail)
+					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已停止（不影响其它池）：%s", pool.label, o.errDetail)}})
+					e.publishPools()
+					return
+				}
+				if pool.consec.Load() >= poolConsecFailLimit {
+					reason := fmt.Sprintf("连续 %d 次调用失败（疑似额度不足或平台故障）", poolConsecFailLimit)
+					pool.failFatal(reason)
+					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已停止（不影响其它池）：%s", pool.label, reason)}})
+					e.publishPools()
+					return
+				}
+				if o.status == store.StatusScored {
+					pool.done.Add(1)
+				} else {
+					pool.fail.Add(1)
 				}
 				statesMu.Lock()
 				st := states[p.ID]
 				statesMu.Unlock()
 				if st != nil {
 					st.mu.Lock()
-					st.outcomes[ti] = o
-					st.remain--
-					last := st.remain == 0
-					st.mu.Unlock()
+					st.outcomes[pool.label] = o
+					already := st.finalized
+					last := !already && satisfied(st)
 					if last {
-						finalize(p, st)
+						st.finalized = true
+					}
+					st.mu.Unlock()
+					switch {
+					case last:
+						finalize(st)
+					case already && o.status == store.StatusScored:
+						// 后加入的池：照片已定稿，只把新评分并入合议平均
+						e.RecomputeAggregate(p.Fingerprint)
 					}
 				}
-				if targetN[ti].Load() > scDesired.Load() {
-					return // 并发被调小：处理完当前这张再退出（不丢照片）
+				if pool.workers.Load() > scDesired.Load() {
+					return // 并发被调小：跑完当前这张再退出
 				}
 			}
 		}()
+		return true
 	}
+	spawnPool := func(pool *modelPool) bool {
+		rp.mu.Lock()
+		defer rp.mu.Unlock()
+		return spawnPoolLocked(pool)
+	}
+	rp.spawn = spawnPoolLocked
 
-	// 压缩池 worker：压完一张喂一张（失败标 bad_image，不进评分）
+	// 初始模型池（首个为主池）
+	rp.mu.Lock()
+	for i, tg := range targets {
+		pool := &modelPool{prov: tg.prov, model: tg.model, label: tg.label, primary: i == 0, started: time.Now()}
+		pool.scale.Store(1)
+		rp.pools = append(rp.pools, pool)
+	}
+	if len(targets) > 0 {
+		rp.primaryLabel = targets[0].label
+	}
+	rp.mu.Unlock()
+
+	// 压缩池 worker：压完一张推入共享清单（失败标 bad_image，不进清单）
 	spawnCompress := func() {
 		compressN.Add(1)
 		compressWG.Add(1)
@@ -1143,24 +1240,24 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 					logutil.Info("压缩失败 %s: %v", p.Filename, err)
 					e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
 					e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}})
+					rp.compress.done.Add(1)
 					continue
 				}
 				e.store.SetPhotoCompressed(p.ID, cp)
 				e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Status: store.StatusCompressed}})
 				publishScoreStage()
-				// 登记完成度跟踪，投给全部目标队列（各模型独立消费）
-				statesMu.Lock()
-				states[p.ID] = &photoState{outcomes: make([]modelOutcome, len(targets)), remain: len(targets), start: time.Now()}
-				statesMu.Unlock()
-				for ti, q := range targetJobs {
-					targetPending[ti].Add(1) // 先加后投：满队阻塞期间收尾不会误判已派发完毕
-					select {
-					case q <- p:
-					case <-ctx.Done():
-						targetPending[ti].Add(-1)
-						stopFlag.Store(true)
-					}
+				// 登记完成度（required=当前活跃池）+ 推入共享清单
+				required := map[string]bool{}
+				rp.mu.Lock()
+				for _, pool := range rp.pools {
+					required[pool.label] = true
 				}
+				rp.mu.Unlock()
+				statesMu.Lock()
+				states[p.ID] = &photoState{p: p, outcomes: map[string]modelOutcome{}, required: required, start: time.Now()}
+				statesMu.Unlock()
+				ready.push(p)
+				rp.compress.done.Add(1)
 				if compressN.Load() > ccDesired.Load() {
 					return // 并发被调小：处理完当前这张再退出
 				}
@@ -1168,43 +1265,50 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 		}()
 	}
 
-	// 动态并发：worker 数每秒对齐配置（运行中可调）。
-	// 初始起满在主流程同步执行（避免与收尾 close 抢锁导致 worker 从未启动）；
-	// poolMu 保证 spawn 与收尾 close 互斥，close 前置 closed 标志后不再扩容，
-	// 杜绝 WaitGroup 的 Add 与 Wait 并发（panic）。评分池的动态窗口保持到各队列派发完毕。
-	var poolMu sync.Mutex
-	var compressClosed bool
-	targetClosed := make([]bool, len(targets)) // 各评分队列是否已关闭（派发完毕一个关一个）
-	tick := 0
+	// 动态并发 + 池状态推送：每秒对齐配置、扫描因池停止而可定稿的照片
 	adjust := func() {
-		poolMu.Lock()
-		defer poolMu.Unlock()
-		tick++
 		sc := int64(e.cfgFn().Pipeline.ScoreConcurrency)
 		cc := int64(e.cfgFn().Pipeline.CompressConcurrency)
-		var totalScore int64
-		for ti := range targets {
-			totalScore += targetN[ti].Load()
-		}
-		// 配置变化/池空（异常）/30 秒心跳时记录，便于核对实际并发
-		if sc != scDesired.Load() || cc != ccDesired.Load() || totalScore == 0 ||
-			(!compressClosed && compressN.Load() == 0) || tick%30 == 0 {
-			logutil.Info("[并发] 期望 每模型评分=%d 压缩=%d，实际 评分总=%d 压缩=%d", sc, cc, totalScore, compressN.Load())
-		}
 		scDesired.Store(sc)
 		ccDesired.Store(cc)
-		for ti := range targets {
-			if targetClosed[ti] {
-				continue
-			}
-			for targetN[ti].Load() < scDesired.Load() {
-				spawnTarget(ti)
+		rp.mu.Lock()
+		pools := append([]*modelPool(nil), rp.pools...)
+		closed := rp.closed
+		rp.mu.Unlock()
+		if !closed {
+			for _, pool := range pools {
+				if pool.halted() {
+					continue
+				}
+				for pool.workers.Load() < sc {
+					if !spawnPool(pool) {
+						break
+					}
+				}
 			}
 		}
+		poolMu.Lock()
 		if !compressClosed {
-			for compressN.Load() < ccDesired.Load() {
+			for compressN.Load() < cc {
 				spawnCompress()
 			}
+		}
+		poolMu.Unlock()
+		e.publishPools()
+		// 池停止/致命后其未完成照片应可定稿：扫一遍未定稿的
+		var todo []*photoState
+		statesMu.Lock()
+		for _, st := range states {
+			st.mu.Lock()
+			if !st.finalized && satisfied(st) {
+				st.finalized = true
+				todo = append(todo, st)
+			}
+			st.mu.Unlock()
+		}
+		statesMu.Unlock()
+		for _, st := range todo {
+			finalize(st)
 		}
 	}
 	adjust() // 主流程同步起满（先于投料与收尾）
@@ -1238,52 +1342,36 @@ producer:
 		case compressJobs <- p:
 		}
 	}
-	// 收尾：先冻结压缩池扩容并关压缩通道。压缩排干后评分队列「派发完毕一个关
-	// 一个」（弹出计数归零 = 该模型全部照片已派发）——关闭前动态并发窗口保持
-	// 开放，中途调大并发立即生效；全部派发完毕后停 supervisor，等评分收尾。
+	// 收尾：冻结压缩池扩容并关压缩通道 → 压缩排干 → 清单标记结束（各池 worker 取尽
+	// 后自行退出）→ 等所有池（含运行中追加的）收尾 → 停 supervisor。
 	poolMu.Lock()
 	compressClosed = true
 	close(compressJobs)
 	poolMu.Unlock()
 	compressWG.Wait()
-	closeRemaining := func() {
-		poolMu.Lock()
-		for ti := range targets {
-			if !targetClosed[ti] {
-				targetClosed[ti] = true
-				close(targetJobs[ti])
-			}
-		}
-		poolMu.Unlock()
-	}
+	rp.compress.finished.Store(true)
+	ready.finish()
 	for {
-		poolMu.Lock()
-		allClosed := true
-		for ti := range targets {
-			if targetClosed[ti] {
-				continue
-			}
-			if targetPending[ti].Load() == 0 {
-				targetClosed[ti] = true
-				close(targetJobs[ti])
-			} else {
-				allClosed = false
+		rp.mu.Lock()
+		alive := 0
+		for _, pool := range rp.pools {
+			if pool.workers.Load() > 0 {
+				alive++
 			}
 		}
-		poolMu.Unlock()
-		if allClosed {
+		if alive == 0 {
+			rp.closed = true // 与 spawnPool 互斥：此后不再起新 worker
+			rp.mu.Unlock()
 			break
 		}
-		if ctx.Err() != nil { // 停止：直接关闭剩余队列，worker 走排空退出路径
-			closeRemaining()
-			break
-		}
+		rp.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
-	targetWG.Wait()
 	close(supQuit)
 	<-supDone
-	return stopFlag.Load() && ctx.Err() != nil
+	// 停止判定只看 ctx：喂料早已结束时没人再置 stopFlag，用 ctx 才准
+	// （ctx 只由 Stop/中止取消，正常跑完不会被取消）
+	return ctx.Err() != nil
 }
 
 func isFinalStatus(s string) bool {
@@ -1305,15 +1393,17 @@ type modelOutcome struct {
 	errDetail string
 	cached    bool
 	clamped   bool
-	fatal     bool // 批次锁定模型在当前平台不存在（404）：应中止整批而非逐张失败
+	fatal     bool // 该模型的致命错误（模型不存在/额度耗尽）：只停本池，不影响其它池
 }
 
-// scoreModel 用单个模型评一张（缓存优先，含重试退避）。
+// scoreModel 用单个模型池评一张（缓存优先，含重试退避）。
 // label 为入库标签（缓存/历史键）：同平台=模型 ID，跨平台="预设/模型"，
 // 避免不同平台的同名模型在缓存与历史里互相覆盖。
+// 429 退避倍率按池隔离（某个平台限流不影响其它池）。
 // 成功时写评分缓存与多模型历史，不写照片正记录（由调用方决定主模型结果）
-func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, label string, p *store.Photo, compressedPath string) modelOutcome {
+func (e *Engine) scoreModel(ctx context.Context, pool *modelPool, p *store.Photo, compressedPath string) modelOutcome {
 	cfg := e.cfgFn()
+	prov, model, label := pool.prov, pool.model, pool.label
 	// 跨会话缓存命中（0 计费）
 	if cfg.Score.ReuseScores {
 		if ent, err := e.store.CacheGet(p.Fingerprint, label, scorer.PromptVersion); err == nil {
@@ -1339,14 +1429,15 @@ func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, 
 	for {
 		attempts++
 		content, err = prov.Score(ctx, model, req)
-		if err == nil || errors.Is(err, provider.ErrModelNoVision) || errors.Is(err, provider.ErrModelNotFound) || ctx.Err() != nil || attempts >= 3 {
+		if err == nil || errors.Is(err, provider.ErrModelNoVision) || errors.Is(err, provider.ErrModelNotFound) ||
+			errors.Is(err, provider.ErrQuotaExhausted) || ctx.Err() != nil || attempts >= 3 {
 			break
 		}
 		backoff := time.Duration(1<<attempts) * time.Second // 2s / 4s
 		if errors.Is(err, provider.ErrRateLimit) {
-			backoff *= time.Duration(e.concScale.Load())
-			// 收到限流：全局降速，成功后无需恢复（评分结束后进程内自然复位）
-			e.concScale.Add(1)
+			backoff *= time.Duration(pool.scale.Load())
+			// 收到限流：本池降速（其它池不受影响），成功后无需恢复（评分结束后进程内自然复位）
+			pool.scale.Add(1)
 		}
 		logutil.Info("重试 %s（第 %d 次）: %v", p.Filename, attempts, err)
 		select {
@@ -1359,9 +1450,14 @@ func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, 
 			err = fmt.Errorf("%w（请在模型下拉更换视觉模型）", err)
 		}
 		if errors.Is(err, provider.ErrModelNotFound) {
-			// 批次锁定模型在当前平台不存在：重试无意义，交由流水线中止整批
+			// 模型在当前平台不存在：重试无意义，只停本池
 			return modelOutcome{status: store.StatusFailed, fatal: true,
 				errDetail: truncate(fmt.Sprintf("模型 %s 在当前平台不存在或无权限：%s", model, err.Error()), 300)}
+		}
+		if errors.Is(err, provider.ErrQuotaExhausted) {
+			// 额度耗尽/无权限：重试无意义，只停本池
+			return modelOutcome{status: store.StatusFailed, fatal: true,
+				errDetail: truncate(fmt.Sprintf("模型 %s 额度不足或无权限：%s", model, err.Error()), 300)}
 		}
 		return modelOutcome{status: store.StatusFailed, errDetail: truncate(err.Error(), 300)}
 	}
@@ -1398,18 +1494,6 @@ func readB64(path string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
-}
-
-// abortTask 中止当前任务（保留排队任务）：批次锁定模型不可用这类致命错误用。
-// 与 Stop 的区别是不清空队列——后续批次可能锁定别的（可用）模型，仍应继续跑。
-func (e *Engine) abortTask(reason string) {
-	e.mu.Lock()
-	cancel := e.cancel
-	e.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": reason}})
 }
 
 // Stop 停止当前任务（已提交请求跑完，不再新增）

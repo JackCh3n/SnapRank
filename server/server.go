@@ -76,6 +76,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/task/pause", s.handleTaskPause)
 	s.mux.HandleFunc("POST /api/task/resume", s.handleTaskResume)
 	s.mux.HandleFunc("POST /api/task/remove", s.handleTaskRemove)
+	s.mux.HandleFunc("POST /api/task/pool", s.handlePoolControl)
+	s.mux.HandleFunc("POST /api/task/pool/add", s.handlePoolAdd)
 	s.mux.HandleFunc("POST /api/clean-cache", s.handleCleanCache)
 	s.mux.HandleFunc("POST /api/dir-history/remove", s.handleRemoveDirHistory)
 	s.mux.HandleFunc("POST /api/pick-dir", s.handlePickDir)
@@ -117,6 +119,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"running":      eng.IsRunning(),
 		"session":      eng.CurrentSession(),
 		"queue":        eng.QueueStatus(),
+		"pools":        eng.PoolsState(), // 压缩池 + 各模型池状态（前端面板）
 		"summary":      sum,
 		"version":      Version,
 	})
@@ -211,6 +214,41 @@ func (s *Server) handleTaskPause(w http.ResponseWriter, r *http.Request) {
 // handleTaskResume 恢复暂停中的任务
 func (s *Server) handleTaskResume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"resumed": s.core.Engine().ResumeTask()})
+}
+
+// handlePoolControl 控制运行中任务的单个模型池（pause | resume | stop）
+func (s *Server) handlePoolControl(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Label  string `json:"label"`
+		Action string `json:"action"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.Engine().ControlPool(req.Label, req.Action); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "pools": s.core.Engine().PoolsState()})
+}
+
+// handlePoolAdd 运行中追加模型池（复用压缩缓存，从第一张开始评）
+func (s *Server) handlePoolAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Preset string `json:"preset"` // 空=当前平台；非空=跨平台预设名
+		Model  string `json:"model"`
+		Conc   int    `json:"conc"` // 0=取配置评分并发
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if err := s.core.Engine().AddModelToRunning(req.Preset, req.Model, req.Conc); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "pools": s.core.Engine().PoolsState()})
 }
 
 // handleTaskRemove 从队列移除一个排队中的任务

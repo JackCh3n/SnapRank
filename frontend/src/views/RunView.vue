@@ -182,6 +182,45 @@
         <span v-if="elapsedText">已用时 {{ elapsedText }}</span>
       </div>
 
+      <!-- 模型池：压缩池 + 每个模型独立池（进度/速度/暂停/停止/运行中追加模型） -->
+      <div v-if="state.pools.length" class="pools">
+        <div v-for="p in state.pools" :key="p.label" class="pool-row" :class="{ 'pool-dim': p.status === 'stopped' || p.status === 'error' }">
+          <span class="pool-name" :title="p.kind === 'compress' ? '压缩池：压好的图进内容寻址缓存，追加/换模型时直接复用，不重新压缩' : p.model">
+            {{ p.kind === 'compress' ? '📦 压缩' : (p.primary ? '★ ' : '') + p.label }}
+          </span>
+          <span class="pool-bar"><i :style="{ width: poolPct(p) + '%' }" :class="'pool-fill-' + p.status"></i></span>
+          <span class="pool-num mono">{{ p.done }}/{{ p.total }}</span>
+          <span class="pool-speed muted" v-if="p.kind === 'model'">
+            <template v-if="p.status === 'stopped' || p.status === 'error'">—</template>
+            <template v-else>{{ p.speed.toFixed(0) }} 张/分<span v-if="p.inflight"> · 在途 {{ p.inflight }}</span></template>
+          </span>
+          <span class="tag pool-tag" :class="'pool-tag-' + p.status">{{ poolStatusLabel(p.status) }}</span>
+          <span class="pool-err error-text" v-if="p.error" :title="p.error">{{ p.error }}</span>
+          <span class="row" style="gap: 4px" v-if="p.kind === 'model' && p.status !== 'stopped' && p.status !== 'error'">
+            <button class="btn plain small" v-if="p.status !== 'paused'" @click="poolAction(p.label, 'pause')"
+              title="暂停该模型：在途请求跑完即挂起，其它模型不受影响">⏸</button>
+            <button class="btn small" v-else @click="poolAction(p.label, 'resume')" title="继续该模型">▶</button>
+            <button class="btn plain small danger-text" @click="poolAction(p.label, 'stop')"
+              title="停止该模型：其余模型继续；它没评的照片由其它模型的结果定稿">■</button>
+          </span>
+        </div>
+        <!-- 运行中追加模型：复用已压缩缓存，从第一张起评（额度不足/想换模型时用） -->
+        <div class="row" style="gap: 6px; align-items: center; margin-top: 8px" v-if="state.running">
+          <span class="muted">➕ 追加模型池（复用压缩缓存，从第一张起评）：</span>
+          <select v-model="addPoolPreset" style="width: 140px" title="平台预设；默认当前平台">
+            <option value="">当前平台</option>
+            <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+          </select>
+          <input v-model="addPoolModel" list="pool-model-options" style="width: 190px"
+            placeholder="模型 ID（可下拉选或手输）" @keyup.enter="addPool" />
+          <datalist id="pool-model-options">
+            <option v-for="m in addPoolModelOptions" :key="m" :value="m" />
+          </datalist>
+          <button class="btn plain small" :disabled="!addPoolModel.trim() || addPoolLoading" @click="addPool">＋ 添加</button>
+          <span v-if="addPoolLoading" class="muted">拉取模型…</span>
+        </div>
+      </div>
+
       <!-- 排队中的目录：当前评分完成后自动开始 -->
       <div v-for="q in queuedDirs" :key="q.sid" class="row" style="align-items: center; gap: 8px; margin-bottom: 4px">
         <span class="tag">⏳ 排队</span>
@@ -348,8 +387,15 @@ const queueCount = computed(() => state.queue.queued.length)
 
 // 评分并发快捷调整（运行中生效：池每秒对齐配置；调小则多余 worker 跑完当前张退出）
 const scoreConc = computed(() => (state.config && state.config.pipeline && state.config.pipeline.score_concurrency) || 1)
-// 多模型时并发按模型数翻倍：每个目标模型（主模型+对比）各一份独立 worker 池
-const activeTargets = computed(() => 1 + (state.compareModels?.length || 0) + (state.compareCross?.length || 0))
+// 多模型时并发按模型数翻倍：每个目标模型（主模型+对比）各一份独立 worker 池。
+// 运行中按实际池数（含中途追加的模型）显示，更准。
+const activeTargets = computed(() => {
+  if (state.running && state.pools.length) {
+    const n = state.pools.filter((p) => p.kind === 'model').length
+    if (n > 0) return n
+  }
+  return 1 + (state.compareModels?.length || 0) + (state.compareCross?.length || 0)
+})
 async function bumpConc(d) {
   const v = Math.min(30, Math.max(1, scoreConc.value + d))
   try {
@@ -362,6 +408,56 @@ async function bumpConc(d) {
   } catch (e) {
     toast(e.message, true)
   }
+}
+
+// ---------- 模型池面板：单池暂停/继续/停止 + 运行中追加模型 ----------
+const addPoolPreset = ref('')
+const addPoolModel = ref('')
+const addPoolModels = ref([])
+const addPoolLoading = ref(false)
+const addPoolModelOptions = computed(() => (addPoolPreset.value ? addPoolModels.value : state.models.vision || []))
+
+async function loadAddPoolModels() {
+  addPoolModels.value = []
+  if (!addPoolPreset.value) return
+  addPoolLoading.value = true
+  try {
+    const r = await api('/api/preset/models', { method: 'POST', body: JSON.stringify({ name: addPoolPreset.value }) })
+    addPoolModels.value = r.models || []
+  } catch (e) {
+    toast('拉取该平台模型失败：' + e.message, true)
+  }
+  addPoolLoading.value = false
+}
+watch(addPoolPreset, loadAddPoolModels)
+
+async function addPool() {
+  const m = addPoolModel.value.trim()
+  if (!m) return
+  try {
+    const r = await api('/api/task/pool/add', { method: 'POST', body: JSON.stringify({ preset: addPoolPreset.value, model: m }) })
+    state.pools = r.pools || state.pools
+    toast(`已追加模型池：${addPoolPreset.value ? addPoolPreset.value + '/' + m : m}（复用压缩缓存，从第一张起评）`)
+    addPoolModel.value = ''
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
+async function poolAction(label, action) {
+  try {
+    const r = await api('/api/task/pool', { method: 'POST', body: JSON.stringify({ label, action }) })
+    state.pools = r.pools || state.pools
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+
+function poolPct(p) {
+  return p.total > 0 ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0
+}
+function poolStatusLabel(s) {
+  return { running: '运行中', paused: '已暂停', stopped: '已停止', error: '出错已停', done: '已完成' }[s] || s
 }
 
 // ---------- 评分管理：暂停 / 继续 / 移除排队目录 ----------
@@ -837,6 +933,25 @@ onMounted(async () => {
 .task-sel { max-width: 340px; font-size: 13px; padding: 4px 8px; vertical-align: middle; }
 .feed-stats { font-size: 12px; }
 .force-tag { background: #3a2c12; color: #ffa300; }
+/* 模型池面板 */
+.pools { margin: 4px 0 12px; padding: 8px 10px; background: var(--card-2, #f5f6f8); border-radius: 8px; }
+.pool-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.pool-dim { opacity: 0.55; }
+.pool-name { width: 185px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool-bar { flex: 1; min-width: 70px; height: 8px; background: #e4e6ea; border-radius: 4px; overflow: hidden; }
+.pool-bar > i { display: block; height: 100%; background: #4a8cff; transition: width .3s; }
+.pool-fill-paused { background: #ffa300; }
+.pool-fill-stopped { background: #9aa0a6; }
+.pool-fill-error { background: #e5484d; }
+.pool-fill-done { background: #2ea043; }
+.pool-num { width: 62px; text-align: right; }
+.pool-speed { width: 128px; font-size: 12px; }
+.pool-tag { font-size: 11px; }
+.pool-tag-paused { background: #3a2c12; color: #ffa300; }
+.pool-tag-stopped { background: #2b2f33; color: #b0b6bb; }
+.pool-tag-error { background: #3a1c1e; color: #ff7b7b; }
+.pool-tag-done { background: #12301c; color: #4ade80; }
+.pool-err { font-size: 11px; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .retry-tag { background: #1f2c3a; color: #10aeff; }
 .title.sub { margin-top: 6px; font-size: 14px; }
 .feed { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
