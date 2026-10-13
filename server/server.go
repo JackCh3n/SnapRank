@@ -59,6 +59,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/db/backup", s.handleDBBackup)
 	s.mux.HandleFunc("POST /api/db/import", s.handleDBImport)
 	s.mux.HandleFunc("POST /api/preset/upsert", s.handlePresetUpsert)
+	s.mux.HandleFunc("POST /api/preset/models", s.handlePresetModels)
 	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
 	s.mux.HandleFunc("POST /api/preset/delete", s.handlePresetDelete)
 	s.mux.HandleFunc("POST /api/gallery/delete", s.handleGalleryDelete)
@@ -294,18 +295,36 @@ func (s *Server) handleDBImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, res)
 }
 
+// handlePresetModels 拉取指定预设平台的模型清单（跨平台对比选择模型用）
+func (s *Server) handlePresetModels(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	ml, err := s.core.ListModelsForPreset(req.Name)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, ml)
+}
+
 func (s *Server) handlePresetUpsert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name     string `json:"name"`
 		BaseURL  string `json:"base_url"`
 		APIKey   string `json:"api_key"`
 		Protocol string `json:"protocol"`
+		Type     string `json:"type"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
 		return
 	}
-	if err := s.core.PresetUpsert(req.Name, req.BaseURL, req.APIKey, req.Protocol); err != nil {
+	if err := s.core.PresetUpsert(req.Name, req.BaseURL, req.APIKey, req.Protocol, req.Type); err != nil {
 		writeErr(w, 400, err)
 		return
 	}

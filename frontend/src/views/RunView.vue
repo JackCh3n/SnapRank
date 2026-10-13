@@ -95,14 +95,35 @@
       </div>
       <div v-if="compareMode" class="row" style="margin-top: 8px; align-items: flex-start">
         <label class="field grow">
-          对比模型（Ctrl/Shift 多选，与主模型并行评分）
+          对比模型（当前平台，Ctrl/Shift 多选）
           <select v-model="state.compareModels" multiple size="5" title="按住 Ctrl 点选多个">
             <option v-for="m in state.models.vision.filter(x => x !== state.selModel)" :key="m" :value="m">{{ m }}</option>
           </select>
         </label>
-        <span class="muted" style="max-width: 260px">
-          主模型（上方下拉）的结果作为照片的正式分数；每个模型各自写入评分历史，照片弹窗可切换对比。已选 {{ state.compareModels.length }} 个对比模型。
-        </span>
+        <div class="field" style="min-width: 320px">
+          跨平台模型（其它平台的预设 + 模型，并行评同一张）
+          <div class="row" style="gap: 6px">
+            <select v-model="crossPreset" style="flex: 1" @change="loadPresetModels" title="平台预设（设置页可添加）">
+              <option value="">选择平台…</option>
+              <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+            </select>
+            <select v-model="crossModel" style="flex: 1" :disabled="!crossPresetModels.length">
+              <option value="">{{ crossPresetLoading ? "拉取中…" : "选择模型…" }}</option>
+              <option v-for="m in crossPresetModels" :key="m" :value="m">{{ m }}</option>
+            </select>
+            <button class="btn plain small" :disabled="!crossPreset || !crossModel" @click="addCrossModel">＋ 添加</button>
+          </div>
+          <div v-if="state.compareCross.length" class="row" style="flex-wrap: wrap; gap: 6px; margin-top: 6px">
+            <span v-for="(c, i) in state.compareCross" :key="c.preset + '/' + c.model" class="tag"
+              style="cursor: pointer" :title="c.preset + ' 平台的 ' + c.model + '（点击移除）'" @click="removeCrossModel(i)">
+              🌐 {{ c.preset }} / {{ c.model }} ×
+            </span>
+          </div>
+        </div>
+      </div>
+      <div v-if="compareMode" class="muted" style="margin-top: 6px">
+        主模型（上方下拉）的结果作为照片的正式分数；每个模型各自写入评分历史，照片弹窗可切换对比。
+        当前共 {{ state.compareModels.length + state.compareCross.length }} 个对比模型（同平台 {{ state.compareModels.length }} + 跨平台 {{ state.compareCross.length }}）。
       </div>
       <div class="muted" style="margin-top: 8px">
         当前模型：<b>{{ state.currentModel || '未设置' }}</b>
@@ -411,7 +432,36 @@ const scanning = ref(false)
 const starting = ref(false)
 // 夜间评分模式：失败自动重试直到全部成功（选择记忆到 localStorage）
 const nightMode = ref(localStorage.getItem('sr_night_mode') === '1')
-const compareMode = ref(false) // 多模型对比：主模型 + compareModels 并行评同一张
+const compareMode = ref(false) // 多模型对比：主模型 + compareModels（同平台）+ compareCross（跨平台）并行评同一张
+const crossPreset = ref('')
+const crossModel = ref('')
+const crossPresetModels = ref([])
+const crossPresetLoading = ref(false)
+const presets = computed(() => (state.config && state.config.presets) || [])
+
+async function loadPresetModels() {
+  crossModel.value = ''
+  crossPresetModels.value = []
+  if (!crossPreset.value) return
+  crossPresetLoading.value = true
+  try {
+    const r = await api('/api/preset/models', { method: 'POST', body: JSON.stringify({ name: crossPreset.value }) })
+    crossPresetModels.value = r.vision || []
+    if (!crossPresetModels.value.length) toast('该平台未发现视觉模型（可在设置调整识别规则）', true)
+  } catch (e) {
+    toast(e.message, true)
+  }
+  crossPresetLoading.value = false
+}
+function addCrossModel() {
+  if (!crossPreset.value || !crossModel.value) return
+  const exists = state.compareCross.some((c) => c.preset === crossPreset.value && c.model === crossModel.value)
+  if (!exists) state.compareCross.push({ preset: crossPreset.value, model: crossModel.value })
+  crossModel.value = ''
+}
+function removeCrossModel(i) {
+  state.compareCross.splice(i, 1)
+}
 watch(nightMode, (v) => localStorage.setItem('sr_night_mode', v ? '1' : '0'))
 const importing = ref(false)
 const importDone = ref(0)
@@ -593,12 +643,14 @@ async function doStart(sample) {
   try {
     // 多目录：逐目录提交，依次进入排队（队列模型天然承接）
     const dirs = parseDirs()
-    // 多模型对比：主模型 + 勾选的对比模型（去重，至少 2 个才启用）
+    // 多模型对比：主模型 + 同平台对比 + 跨平台对比（总计至少 2 个才启用）
     let models
+    let crossModels
     if (compareMode.value && !sample) {
       models = [state.selModel, ...state.compareModels.filter((m) => m && m !== state.selModel)]
-      if (models.length < 2) {
-        toast('多模型对比至少需要 2 个模型（主模型 + 1 个对比模型）', true)
+      crossModels = state.compareCross.map((c) => ({ preset: c.preset, model: c.model }))
+      if (models.length + crossModels.length < 2) {
+        toast('多模型对比至少需要 2 个模型（同平台或跨平台均可）', true)
         starting.value = false
         return
       }
@@ -607,7 +659,7 @@ async function doStart(sample) {
     for (const d of dirs) {
       const r = await api('/api/start', {
         method: 'POST',
-        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models }),
+        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models, cross_models: crossModels }),
       })
       const t = taskOf(r.session_id)
       t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
@@ -626,7 +678,7 @@ async function doStart(sample) {
       toast(`${nightTag}继续上次：剩余 ${first.pending} 张待评分${queued ? '，已排队' : ''}`)
     }
     else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(first.session_id)} 个目录）`)
-    else toast(`${nightTag}开始评分（模型 ${first.model}${models && models.length > 1 ? ` +${models.length - 1} 对比` : ''}）`)
+    else toast(`${nightTag}开始评分（模型 ${first.model}${models && (models.length + (crossModels ? crossModels.length : 0)) > 1 ? ` +${models.length - 1 + (crossModels ? crossModels.length : 0)} 对比` : ''}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)

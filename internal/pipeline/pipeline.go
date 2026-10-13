@@ -126,6 +126,23 @@ type StartOpts struct {
 	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
 	Night    bool     `json:"night"`     // 夜间评分模式：失败照片轮末重新入队，循环重试直到全部成功
 	Models   []string `json:"models"`    // 多模型对比：≥2 个模型并行评同一张；首个为主模型（入正记录），其余进评分历史
+	// 跨平台对比：引用预设（各平台 URL/Key/协议）+ 该平台的模型 ID，
+	// 与当前平台的模型并行评同一张（如 A 站的 a 模型 + B 站的 b 模型）
+	CrossModels []CrossModel `json:"cross_models"`
+}
+
+// CrossModel 跨平台对比模型：Preset 为配置里的平台预设名
+type CrossModel struct {
+	Preset string `json:"preset"`
+	Model  string `json:"model"`
+}
+
+// scoreTarget 一次评分的调用目标：模型 + 所属 Provider + 入库标签
+// （同平台标签=模型 ID；跨平台为 "预设/模型"，避免不同平台同名模型在缓存/历史里冲突）
+type scoreTarget struct {
+	prov  provider.Provider
+	model string
+	label string
 }
 
 // queuedTask 排队中的任务
@@ -309,6 +326,30 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 			opts.Models = models
 			model = models[0]
 		}
+	}
+	// 跨平台对比模型：校验预设存在、去重（同平台同名模型只保留一个）
+	if len(opts.CrossModels) > 0 {
+		presetNames := map[string]bool{}
+		for _, p := range cfg.Presets {
+			presetNames[p.Name] = true
+		}
+		seen := map[string]bool{}
+		valid := make([]CrossModel, 0, len(opts.CrossModels))
+		for _, cm := range opts.CrossModels {
+			if cm.Preset == "" || cm.Model == "" {
+				continue
+			}
+			key := cm.Preset + "/" + cm.Model
+			if seen[key] {
+				continue
+			}
+			if !presetNames[cm.Preset] {
+				return nil, fmt.Errorf("跨平台模型引用的预设不存在: %s（可在设置页添加）", cm.Preset)
+			}
+			seen[key] = true
+			valid = append(valid, cm)
+		}
+		opts.CrossModels = valid
 	}
 	if model == "" && len(cfg.Model.VisionPatterns) > 0 {
 		// 配置默认模型为空：从 Provider 拉取首个可用模型兜底由 UI 层处理；
@@ -832,7 +873,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	// （追加照片到同一目录再评分时，老照片不会重新压缩）
 	cacheDir := filepath.Join(cfg.Paths.DataDir, "work", "compressed")
 	cacheHits := 0
-	multiModel := len(opts.Models) > 1
+	multiModel := len(opts.Models) > 1 || len(opts.CrossModels) > 0
 	if cfg.Score.ReuseScores && !multiModel { // 多模型对比走池内逐模型缓存，不走单模型捷径
 		var remaining []*store.Photo
 		for _, p := range queue {
@@ -887,18 +928,47 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	if len(compressQueue) == 0 && totalAll > 0 {
 		publishScoreStage()
 	}
-	models := []string{model}
-	if len(opts.Models) > 1 {
-		models = opts.Models
+	// 评分目标：当前平台的模型 + 跨平台预设的模型（首个为主模型，入照片正记录）
+	targets := []scoreTarget{{prov: prov, model: model, label: model}}
+	for _, m := range opts.Models {
+		if m != model {
+			targets = append(targets, scoreTarget{prov: prov, model: m, label: m})
+		}
 	}
-	return e.streamPools(ctx, eng, prov, models, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+	for _, cm := range opts.CrossModels {
+		cp, err := e.providerForPreset(cm.Preset)
+		if err != nil {
+			logutil.Error("跨平台模型 %s/%s 构造 Provider 失败: %v", cm.Preset, cm.Model, err)
+			continue
+		}
+		targets = append(targets, scoreTarget{prov: cp, model: cm.Model, label: cm.Preset + "/" + cm.Model})
+	}
+	return e.streamPools(ctx, eng, targets, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+}
+
+// providerForPreset 按预设名构造该平台的 Provider（跨平台对比用）
+func (e *Engine) providerForPreset(name string) (provider.Provider, error) {
+	cfg := e.cfgFn()
+	for _, p := range cfg.Presets {
+		if p.Name == name {
+			pc := *cfg
+			pc.Provider = config.Provider{BaseURL: p.BaseURL, APIKey: p.APIKey, Protocol: p.Protocol}
+			if p.Type != "" {
+				pc.Provider.Type = p.Type
+			} else {
+				pc.Provider.Type = "tokenrhythm"
+			}
+			return provider.New(&pc)
+		}
+	}
+	return nil, fmt.Errorf("预设不存在: %s", name)
 }
 
 // streamPools 压缩池与评分池流水并行：压缩成功一张投喂一张（通道缓冲承担背压），
 // 评分池来一张评一张。返回是否被停止。
 // 暂停语义：评分 worker 与压缩投料口都在「跑完当前这张后」挂起；
 // 停止语义：ctx 取消后各环节经 select 逃逸，未评分照片留在原状态供续跑。
-func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov provider.Provider, models []string,
+func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets []scoreTarget,
 	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
 
 	// 动态并发：worker 数每秒对齐配置（设置页/运行页调整保存后 1 秒内生效；
@@ -925,7 +995,7 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, prov pro
 					continue
 				}
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
-				prog := e.scoreOneMulti(ctx, prov, models, p, cp, totalAll, &doneCount)
+				prog := e.scoreOneMulti(ctx, targets, p, cp, totalAll, &doneCount)
 				e.Bus.Publish(Event{Type: "progress", Data: prog})
 				if scoreN.Load() > scDesired.Load() {
 					return // 并发被调小：处理完当前这张再退出（不丢照片）
@@ -1064,21 +1134,21 @@ type modelOutcome struct {
 	clamped   bool
 }
 
-// scoreOneMulti 评分单张：单模型走原路径；多模型（≥2）并行评同一张，
+// scoreOneMulti 评分单张：单目标走原路径；多目标（≥2，可跨平台）并行评同一张，
 // 主模型（首个）结果入照片正记录，全部模型各自写评分缓存与历史（弹窗可对比）
-func (e *Engine) scoreOneMulti(ctx context.Context, prov provider.Provider, models []string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
-	if len(models) <= 1 {
-		return e.scoreOne(ctx, prov, models[0], p, compressedPath, total, doneCount)
+func (e *Engine) scoreOneMulti(ctx context.Context, targets []scoreTarget, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
+	if len(targets) <= 1 {
+		return e.scoreOne(ctx, targets[0].prov, targets[0].model, targets[0].label, p, compressedPath, total, doneCount)
 	}
 	start := time.Now()
-	outcomes := make([]modelOutcome, len(models))
+	outcomes := make([]modelOutcome, len(targets))
 	var wg sync.WaitGroup
-	for i, m := range models {
+	for i, tg := range targets {
 		wg.Add(1)
-		go func(i int, m string) {
+		go func(i int, tg scoreTarget) {
 			defer wg.Done()
-			outcomes[i] = e.scoreModel(ctx, prov, m, p, compressedPath)
-		}(i, m)
+			outcomes[i] = e.scoreModel(ctx, tg.prov, tg.model, tg.label, p, compressedPath)
+		}(i, tg)
 	}
 	wg.Wait()
 	idx := doneCount.Add(1)
@@ -1091,10 +1161,10 @@ func (e *Engine) scoreOneMulti(ctx context.Context, prov provider.Provider, mode
 		if primary.cached {
 			src = "cache"
 		}
-		e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, models[0], scorer.PromptVersion, src, primary.clamped, time.Since(start).Milliseconds())
+		e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, targets[0].label, scorer.PromptVersion, src, primary.clamped, time.Since(start).Milliseconds())
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}
 	case store.StatusParseFail:
-		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", models[0], scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
+		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", targets[0].label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
 		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(primary.errDetail, 500))
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(primary.errDetail, 200)}
 	case store.StatusBadImage:
@@ -1106,13 +1176,15 @@ func (e *Engine) scoreOneMulti(ctx context.Context, prov provider.Provider, mode
 	}
 }
 
-// scoreModel 用单个模型评一张（缓存优先，含重试退避）；
+// scoreModel 用单个模型评一张（缓存优先，含重试退避）。
+// label 为入库标签（缓存/历史键）：同平台=模型 ID，跨平台="预设/模型"，
+// 避免不同平台的同名模型在缓存与历史里互相覆盖。
 // 成功时写评分缓存与多模型历史，不写照片正记录（由调用方决定主模型结果）
-func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model string, p *store.Photo, compressedPath string) modelOutcome {
+func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, label string, p *store.Photo, compressedPath string) modelOutcome {
 	cfg := e.cfgFn()
 	// 跨会话缓存命中（0 计费）
 	if cfg.Score.ReuseScores {
-		if ent, err := e.store.CacheGet(p.Fingerprint, model, scorer.PromptVersion); err == nil {
+		if ent, err := e.store.CacheGet(p.Fingerprint, label, scorer.PromptVersion); err == nil {
 			d := ent.Dims
 			return modelOutcome{dims: &d, tags: ent.Tags, strength: ent.Strength, weakness: ent.Weakness, status: store.StatusScored, cached: true}
 		}
@@ -1166,17 +1238,17 @@ func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model s
 		return modelOutcome{status: store.StatusParseFail, errDetail: truncate(fmt.Sprintf("%s ｜ 模型输出片段: %s", perr.Error(), frag), 500)}
 	}
 	// 成功：写评分缓存 + 多模型历史（每次 API 评分追加一条，切换模型可对比）
-	e.store.CachePut(p.Fingerprint, model, scorer.PromptVersion, dims, tags, strength, weakness)
+	e.store.CachePut(p.Fingerprint, label, scorer.PromptVersion, dims, tags, strength, weakness)
 	score := scorer.WeightedScore(dims, cfg.WeightsNormalized())
-	e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &dims, tags, strength, weakness, "api")
+	e.store.SavePhotoModelScore(p.ID, label, scorer.PromptVersion, score, &dims, tags, strength, weakness, "api")
 	return modelOutcome{dims: &dims, tags: tags, strength: strength, weakness: weakness, status: store.StatusScored, clamped: clamped}
 }
 
 // scoreOne 评分单张（含跨会话缓存命中与重试退避）
-func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
+func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model, label string, p *store.Photo, compressedPath string, total int, doneCount *atomic.Int64) Progress {
 	cfg := e.cfgFn()
 	start := time.Now()
-	o := e.scoreModel(ctx, prov, model, p, compressedPath)
+	o := e.scoreModel(ctx, prov, model, label, p, compressedPath)
 	idx := doneCount.Add(1)
 	switch o.status {
 	case store.StatusScored:
@@ -1184,12 +1256,12 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model str
 		src := "api"
 		if o.cached {
 			src = "cache"
-			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, o.dims, o.tags, o.strength, o.weakness, "cache")
+			e.store.SavePhotoModelScore(p.ID, label, scorer.PromptVersion, score, o.dims, o.tags, o.strength, o.weakness, "cache")
 		}
-		e.store.SetPhotoResult(p.ID, store.StatusScored, score, o.dims, o.tags, o.strength, o.weakness, model, scorer.PromptVersion, src, o.clamped, time.Since(start).Milliseconds())
+		e.store.SetPhotoResult(p.ID, store.StatusScored, score, o.dims, o.tags, o.strength, o.weakness, label, scorer.PromptVersion, src, o.clamped, time.Since(start).Milliseconds())
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: o.cached}
 	case store.StatusParseFail:
-		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", model, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
+		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
 		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(o.errDetail, 500))
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(o.errDetail, 200)}
 	case store.StatusBadImage:

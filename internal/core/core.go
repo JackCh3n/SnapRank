@@ -726,7 +726,7 @@ func (c *Core) ImportDB(path string) (*store.ImportResult, error) {
 }
 
 // PresetUpsert 保存平台预设（同名覆盖；apiKey 为空保持原值）
-func (c *Core) PresetUpsert(name, baseURL, apiKey, protocol string) error {
+func (c *Core) PresetUpsert(name, baseURL, apiKey, protocol, ptype string) error {
 	if name == "" {
 		return fmt.Errorf("预设名不能为空")
 	}
@@ -736,14 +736,49 @@ func (c *Core) PresetUpsert(name, baseURL, apiKey, protocol string) error {
 		if c.cfg.Presets[i].Name == name {
 			c.cfg.Presets[i].BaseURL = baseURL
 			c.cfg.Presets[i].Protocol = protocol
+			c.cfg.Presets[i].Type = ptype
 			if apiKey != "" {
 				c.cfg.Presets[i].APIKey = apiKey
 			}
 			return c.cfg.Save()
 		}
 	}
-	c.cfg.Presets = append(c.cfg.Presets, config.PlatformPreset{Name: name, BaseURL: baseURL, APIKey: apiKey, Protocol: protocol})
+	c.cfg.Presets = append(c.cfg.Presets, config.PlatformPreset{Name: name, BaseURL: baseURL, APIKey: apiKey, Protocol: protocol, Type: ptype})
 	return c.cfg.Save()
+}
+
+// ListModelsForPreset 拉取指定预设平台的模型清单（跨平台对比的模型选择用）
+func (c *Core) ListModelsForPreset(name string) (*ModelList, error) {
+	cfg := c.snapshotConfig()
+	for _, p := range cfg.Presets {
+		if p.Name == name {
+			prov, err := provider.New(providerConfigForPreset(cfg, p))
+			if err != nil {
+				return nil, err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			all, err := prov.ListModels(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("拉取 %s 模型清单失败: %s（请检查该平台的 Key 与地址）", name, sanitizeErr(err))
+			}
+			return &ModelList{All: all, Vision: provider.FilterVision(all, cfg.Model.VisionPatterns)}, nil
+		}
+	}
+	return nil, fmt.Errorf("预设不存在: %s", name)
+}
+
+// providerConfigForPreset 用预设的平台信息构造一份 Provider 配置
+// （预设 Type 为空按真实平台；填 mock 可离线体验）
+func providerConfigForPreset(cfg *config.Config, p config.PlatformPreset) *config.Config {
+	pc := *cfg
+	pc.Provider = config.Provider{BaseURL: p.BaseURL, APIKey: p.APIKey, Protocol: p.Protocol}
+	if p.Type != "" {
+		pc.Provider.Type = p.Type
+	} else {
+		pc.Provider.Type = "tokenrhythm"
+	}
+	return &pc
 }
 
 // PresetApply 应用预设到当前接入配置
@@ -759,7 +794,10 @@ func (c *Core) PresetApply(name string) (*config.Config, error) {
 			if c.cfg.Provider.Protocol == "" && strings.Contains(p.BaseURL, "/api/coding") {
 				c.cfg.Provider.Protocol = "anthropic"
 			}
-			if c.cfg.Provider.Type == "mock" {
+			// 预设记录了 provider 类型则一并应用（如 mock 离线预设）；否则按真实平台
+			if p.Type != "" {
+				c.cfg.Provider.Type = p.Type
+			} else if c.cfg.Provider.Type == "mock" {
 				c.cfg.Provider.Type = "tokenrhythm"
 			}
 			if err := c.cfg.Save(); err != nil {

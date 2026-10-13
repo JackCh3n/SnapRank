@@ -256,7 +256,7 @@ async function saveAsPreset() {
   try {
     await api('/api/preset/upsert', {
       method: 'POST',
-      body: JSON.stringify({ name, base_url: c.provider.base_url, api_key: c.provider.api_key || '', protocol: c.provider.protocol || 'chat' }),
+      body: JSON.stringify({ name, base_url: c.provider.base_url, api_key: c.provider.api_key || '', protocol: c.provider.protocol || 'chat', type: c.provider.type || '' }),
     })
     const st = await api('/api/state')
     state.config = st.config

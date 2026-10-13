@@ -72,12 +72,14 @@ type PathsConfig struct {
 	DataDir     string `yaml:"data_dir" json:"data_dir"`         // 数据目录（配置/库/缓存/日志父目录）
 }
 
-// PlatformPreset 平台接入预设（多套 url+key 快速切换）
+// PlatformPreset 平台接入预设（多套 url+key 快速切换）。
+// Type 为空按真实平台处理（tokenrhythm/anthropic 按协议）；填 mock 可离线体验
 type PlatformPreset struct {
 	Name     string `yaml:"name" json:"name"`
 	BaseURL  string `yaml:"base_url" json:"base_url"`
 	APIKey   string `yaml:"api_key" json:"api_key"`
 	Protocol string `yaml:"protocol" json:"protocol"`
+	Type     string `yaml:"type,omitempty" json:"type,omitempty"`
 }
 
 // GalleryConfig 图库删除行为
