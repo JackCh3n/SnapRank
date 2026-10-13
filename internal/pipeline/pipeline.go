@@ -1010,6 +1010,9 @@ func (e *Engine) providerForPreset(name string) (provider.Provider, error) {
 // 每个模型（含跨平台）独立消费整份照片清单、各自独立并发——快模型不被
 // 慢模型拖住，各平台限速互不影响；一张照片的全部模型完成后才入正记录
 // 并计进度（合议平均在此时生效）。返回是否被停止。
+// 动态并发窗口保持到各队列「派发完毕」（弹出计数归零）才逐个关闭：
+// 预压缩/缓存命中的批次压缩阶段秒退，若此时立即关队列，运行中调大
+// 并发将永远不生效（worker 只减不增）。
 // 暂停语义：评分 worker 与压缩投料口都在「跑完当前这张后」挂起；
 // 停止语义：ctx 取消后各环节经 select 逃逸，未评分照片留在原状态供续跑。
 func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets []scoreTarget,
@@ -1030,6 +1033,9 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	var compressWG, targetWG sync.WaitGroup
 	var compressN atomic.Int64
 	targetN := make([]atomic.Int64, len(targets))
+	// 各目标队列「已投递-已弹出」计数：压缩排干后据此判定该模型是否派发完毕，
+	// 排干一个关一个——动态并发窗口保持到派发完毕，中途调大并发立即生效
+	targetPending := make([]atomic.Int64, len(targets))
 
 	// 照片完成度跟踪：全部目标完成 → finalize（主模型入正记录 + 合议 + 进度）
 	type photoState struct {
@@ -1080,6 +1086,7 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 			defer targetN[ti].Add(-1)
 			tg := targets[ti]
 			for p := range targetJobs[ti] {
+				targetPending[ti].Add(-1) // 弹出即减：收尾据此判定该模型派发完毕
 				if !e.waitIfPaused(ctx) {
 					stopFlag.Store(true)
 					continue
@@ -1132,10 +1139,12 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 				statesMu.Lock()
 				states[p.ID] = &photoState{outcomes: make([]modelOutcome, len(targets)), remain: len(targets), start: time.Now()}
 				statesMu.Unlock()
-				for _, q := range targetJobs {
+				for ti, q := range targetJobs {
+					targetPending[ti].Add(1) // 先加后投：满队阻塞期间收尾不会误判已派发完毕
 					select {
 					case q <- p:
 					case <-ctx.Done():
+						targetPending[ti].Add(-1)
 						stopFlag.Store(true)
 					}
 				}
@@ -1149,28 +1158,34 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	// 动态并发：worker 数每秒对齐配置（运行中可调）。
 	// 初始起满在主流程同步执行（避免与收尾 close 抢锁导致 worker 从未启动）；
 	// poolMu 保证 spawn 与收尾 close 互斥，close 前置 closed 标志后不再扩容，
-	// 杜绝 WaitGroup 的 Add 与 Wait 并发（panic）。评分池的动态窗口保持到评分排干。
+	// 杜绝 WaitGroup 的 Add 与 Wait 并发（panic）。评分池的动态窗口保持到各队列派发完毕。
 	var poolMu sync.Mutex
-	var compressClosed, targetsClosed bool
+	var compressClosed bool
+	targetClosed := make([]bool, len(targets)) // 各评分队列是否已关闭（派发完毕一个关一个）
+	tick := 0
 	adjust := func() {
 		poolMu.Lock()
 		defer poolMu.Unlock()
+		tick++
 		sc := int64(e.cfgFn().Pipeline.ScoreConcurrency)
 		cc := int64(e.cfgFn().Pipeline.CompressConcurrency)
 		var totalScore int64
 		for ti := range targets {
 			totalScore += targetN[ti].Load()
 		}
-		if sc != scDesired.Load() || cc != ccDesired.Load() || totalScore == 0 || compressN.Load() == 0 {
+		// 配置变化/池空（异常）/30 秒心跳时记录，便于核对实际并发
+		if sc != scDesired.Load() || cc != ccDesired.Load() || totalScore == 0 ||
+			(!compressClosed && compressN.Load() == 0) || tick%30 == 0 {
 			logutil.Info("[并发] 期望 每模型评分=%d 压缩=%d，实际 评分总=%d 压缩=%d", sc, cc, totalScore, compressN.Load())
 		}
 		scDesired.Store(sc)
 		ccDesired.Store(cc)
-		if !targetsClosed {
-			for ti := range targets {
-				for targetN[ti].Load() < scDesired.Load() {
-					spawnTarget(ti)
-				}
+		for ti := range targets {
+			if targetClosed[ti] {
+				continue
+			}
+			for targetN[ti].Load() < scDesired.Load() {
+				spawnTarget(ti)
 			}
 		}
 		if !compressClosed {
@@ -1210,19 +1225,48 @@ producer:
 		case compressJobs <- p:
 		}
 	}
-	// 收尾：先冻结压缩池扩容并关压缩通道（评分池仍可动态调整），
-	// 压缩排干后再冻结评分池并关评分通道，最后停 supervisor
+	// 收尾：先冻结压缩池扩容并关压缩通道。压缩排干后评分队列「派发完毕一个关
+	// 一个」（弹出计数归零 = 该模型全部照片已派发）——关闭前动态并发窗口保持
+	// 开放，中途调大并发立即生效；全部派发完毕后停 supervisor，等评分收尾。
 	poolMu.Lock()
 	compressClosed = true
 	close(compressJobs)
 	poolMu.Unlock()
 	compressWG.Wait()
-	poolMu.Lock()
-	targetsClosed = true
-	for _, q := range targetJobs {
-		close(q)
+	closeRemaining := func() {
+		poolMu.Lock()
+		for ti := range targets {
+			if !targetClosed[ti] {
+				targetClosed[ti] = true
+				close(targetJobs[ti])
+			}
+		}
+		poolMu.Unlock()
 	}
-	poolMu.Unlock()
+	for {
+		poolMu.Lock()
+		allClosed := true
+		for ti := range targets {
+			if targetClosed[ti] {
+				continue
+			}
+			if targetPending[ti].Load() == 0 {
+				targetClosed[ti] = true
+				close(targetJobs[ti])
+			} else {
+				allClosed = false
+			}
+		}
+		poolMu.Unlock()
+		if allClosed {
+			break
+		}
+		if ctx.Err() != nil { // 停止：直接关闭剩余队列，worker 走排空退出路径
+			closeRemaining()
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	targetWG.Wait()
 	close(supQuit)
 	<-supDone

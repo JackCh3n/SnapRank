@@ -156,11 +156,11 @@
         <span class="row" style="gap: 8px; align-items: center">
           <span class="eta" v-if="etaText">{{ etaText }}</span>
           <span v-if="state.queue.paused" class="tag" style="background: #3a2c12; color: #ffa300">⏸ 已暂停</span>
-          <span class="row" style="gap: 3px; align-items: center" title="评分并发：运行中可调，1 秒内生效（调小则多余进程跑完当前张退出）">
+          <span class="row" style="gap: 3px; align-items: center" title="评分并发（每模型独立一份）：运行中可调，1 秒内生效（调小则多余进程跑完当前张退出）">
             <button class="btn plain small" style="padding: 2px 8px" :disabled="scoreConc <= 1" @click="bumpConc(-1)">−</button>
             <b>{{ scoreConc }}</b>
             <button class="btn plain small" style="padding: 2px 8px" :disabled="scoreConc >= 30" @click="bumpConc(1)">＋</button>
-            并发
+            并发<span v-if="activeTargets > 1" class="muted" style="margin-left: 2px">/模型 · 共 {{ scoreConc * activeTargets }} 路同时请求</span>
           </span>
           <template v-if="state.running">
             <button v-if="!state.queue.paused" class="btn plain small" title="正在评分的这张完成后挂起" @click="pauseTask">⏸ 暂停</button>
@@ -259,7 +259,7 @@ function applyManualModel() {
   toast(`已选择模型：${m}（下次开始时生效）`)
 }
 const picking = ref(false)
-const formatPreset = ref('')
+const formatPreset = ref('jpg') // 默认仅 JPG：RAW/HEIC 伴生文件会登记为无法处理，多数用户只评成片
 
 const PRESETS = {
   '': [],
@@ -342,6 +342,8 @@ const queueCount = computed(() => state.queue.queued.length)
 
 // 评分并发快捷调整（运行中生效：池每秒对齐配置；调小则多余 worker 跑完当前张退出）
 const scoreConc = computed(() => (state.config && state.config.pipeline && state.config.pipeline.score_concurrency) || 1)
+// 多模型时并发按模型数翻倍：每个目标模型（主模型+对比）各一份独立 worker 池
+const activeTargets = computed(() => 1 + (state.compareModels?.length || 0) + (state.compareCross?.length || 0))
 async function bumpConc(d) {
   const v = Math.min(30, Math.max(1, scoreConc.value + d))
   try {

@@ -12,7 +12,9 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -373,6 +375,17 @@ func truncateStr(s string, n int) string {
 // 文件名包含 BADJSON 时返回畸形输出（验证 parse_fail 链路）。
 type Mock struct{}
 
+// mockDelay 单次评分的模拟延迟；可用 SNAPRANK_MOCK_DELAY_MS 调大，
+// 便于离线验证并发行为（默认 150ms）
+var mockDelay = func() time.Duration {
+	if v := os.Getenv("SNAPRANK_MOCK_DELAY_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 600000 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 150 * time.Millisecond
+}()
+
 // Name 平台名
 func (m *Mock) Name() string { return "mock" }
 
@@ -383,6 +396,9 @@ func (m *Mock) ListModels(ctx context.Context) ([]string, error) {
 
 // Score 生成确定性伪评分输出
 func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (string, error) {
+	start := time.Now()
+	logutil.Info("[评分] %s 开始（mock）", model)
+	defer func() { logutil.Info("[评分] %s 完成，耗时 %dms（mock）", model, time.Since(start).Milliseconds()) }()
 	if strings.Contains(strings.ToUpper(req.Filename), "BADJSON") {
 		return `哎呀，这张照片感觉 {一般吧}`, nil
 	}
@@ -409,7 +425,7 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 			"weakness": "（mock）为离线演示生成的确定性评分",
 		},
 	})
-	time.Sleep(150 * time.Millisecond) // 模拟网络延迟，便于观察并发
+	time.Sleep(mockDelay) // 模拟网络延迟，便于观察并发
 	return string(b), nil
 }
 
