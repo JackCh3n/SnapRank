@@ -17,6 +17,93 @@ import (
 // （只停本池，不影响其它模型池与任务）
 const poolConsecFailLimit = 10
 
+// ---------- 可追加的压缩投料队列 ----------
+
+// workQueue 压缩投料队列（运行中可追加）：新目录并入当前批次时把照片推进来，
+// 压缩池接着压、各模型池接着评——模型不再空等下一个目录。
+type workQueue struct {
+	mu        sync.Mutex
+	items     []*store.Photo
+	head      int
+	done      bool
+	appending int // 正在扫描/登记新目录并入：此期间队列暂空也不算收尾
+}
+
+func newWorkQueue(ps []*store.Photo) *workQueue {
+	return &workQueue{items: append([]*store.Photo(nil), ps...)}
+}
+
+func (q *workQueue) push(ps ...*store.Photo) {
+	if len(ps) == 0 {
+		return
+	}
+	q.mu.Lock()
+	q.items = append(q.items, ps...)
+	q.mu.Unlock()
+}
+
+// beginAppend / endAppend 标记「正在并入新目录」：期间即使队列为空也不判收尾
+// （目录扫描+登记要几秒，避免批次提前收尾导致新目录落到另一个批次）
+func (q *workQueue) beginAppend() {
+	q.mu.Lock()
+	q.appending++
+	q.mu.Unlock()
+}
+
+func (q *workQueue) endAppend() {
+	q.mu.Lock()
+	if q.appending > 0 {
+		q.appending--
+	}
+	q.mu.Unlock()
+}
+
+// finish 没有更多照片了（压缩投料收尾）
+func (q *workQueue) finish() {
+	q.mu.Lock()
+	q.done = true
+	q.mu.Unlock()
+}
+
+// next 取下一张（尚未追加则轮询等待）。队列结束、收到收尾信号、被停止或 ctx
+// 取消时返回 (nil,false)。
+func (q *workQueue) next(ctx context.Context, stopped *atomic.Bool, quit <-chan struct{}) (*store.Photo, bool) {
+	for {
+		select {
+		case <-quit:
+			return nil, false
+		default:
+		}
+		q.mu.Lock()
+		if q.head < len(q.items) {
+			p := q.items[q.head]
+			q.head++
+			q.mu.Unlock()
+			return p, true
+		}
+		done := q.done
+		q.mu.Unlock()
+		if done || ctx.Err() != nil || (stopped != nil && stopped.Load()) {
+			return nil, false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// empty 队列已取尽且没有正在并入的目录
+func (q *workQueue) empty() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.head >= len(q.items) && q.appending == 0
+}
+
+// total 已推入总数（含已取走的）
+func (q *workQueue) total() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
 // ---------- 共享压缩产出清单 ----------
 
 // readyList 压缩池产出、各模型池按各自游标消费的共享清单。
@@ -138,11 +225,36 @@ type runPools struct {
 	mu           sync.Mutex
 	pools        []*modelPool
 	ready        *readyList
+	work         *workQueue // 压缩投料队列（运行中可追加新目录的照片）
 	planned      int64
 	primaryLabel string
 	closed       bool             // 收尾中/已收尾：拒绝再追加池
 	spawn        func(*modelPool) bool // 由 streamPools 注入；false=任务已收尾
 	compress     compressState
+}
+
+// AddPhotosToRunning 把新目录的照片并入运行中的批次（压缩池接着压、各模型池接着评）。
+// 已压缩过的走内容寻址缓存直接命中，不重新压缩。
+func (e *Engine) AddPhotosToRunning(photos []*store.Photo) error {
+	rp := e.pools.Load()
+	if rp == nil {
+		return fmt.Errorf("当前没有运行中的任务")
+	}
+	if len(photos) == 0 {
+		return nil
+	}
+	rp.mu.Lock()
+	if rp.closed {
+		rp.mu.Unlock()
+		return fmt.Errorf("任务正在收尾，无法并入新目录")
+	}
+	rp.planned += int64(len(photos))
+	rp.mu.Unlock()
+	rp.work.push(photos...)
+	rp.compress.total.Add(int64(len(photos)))
+	logutil.Info("并入当前批次 %d 张（模型池接着评，压缩缓存复用）", len(photos))
+	e.publishPools()
+	return nil
 }
 
 // compressState 压缩池进度

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -340,6 +341,95 @@ func (s *Store) FindResumableSession(sourceDir string) (*Session, error) {
 		return nil, err
 	}
 	return &se, nil
+}
+
+// FindResumableSessionsForDirs 找出与给定目录集合有交集的未完成会话（新→旧）。
+// 会话的 source_dir 可能是 ";" 分隔的多目录（多目录合并成一个批次）。
+func (s *Store) FindResumableSessionsForDirs(dirs []string) ([]*Session, error) {
+	want := map[string]bool{}
+	for _, d := range dirs {
+		if k := normalizeDirKey(d); k != "" {
+			want[k] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT id, name, created_at, source_dir, model, prompt_version, status, total, done
+		FROM sessions WHERE status IN (?,?) ORDER BY created_at DESC`, SessionRunning, SessionStopped)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Session
+	for rows.Next() {
+		var se Session
+		if err := rows.Scan(&se.ID, &se.Name, &se.CreatedAt, &se.SourceDir, &se.Model, &se.PromptVersion, &se.Status, &se.Total, &se.Done); err != nil {
+			return nil, err
+		}
+		for _, d := range strings.Split(se.SourceDir, ";") {
+			if want[normalizeDirKey(d)] {
+				cp := se
+				list = append(list, &cp)
+				break
+			}
+		}
+	}
+	return list, rows.Err()
+}
+
+// normalizeDirKey 目录比较用规范形：去空白、统一分隔符、去尾斜杠、小写盘符
+func normalizeDirKey(d string) string {
+	d = strings.TrimSpace(d)
+	if d == "" {
+		return ""
+	}
+	d = strings.ReplaceAll(d, "\\", "/")
+	d = strings.TrimRight(d, "/")
+	if len(d) > 1 && d[1] == ':' {
+		d = strings.ToLower(d[:1]) + d[1:]
+	}
+	return d
+}
+
+// MergeSessionInto 把 from 会话的照片并入 to 会话（同 src_path 的重复条目丢弃 from 侧），
+// 删除 from 会话行。用于「多个目录合并为一个批次」。返回并入的照片数。
+func (s *Store) MergeSessionInto(from, to string) (int64, error) {
+	if from == "" || to == "" || from == to {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM photos WHERE session_id=? AND src_path IN (SELECT src_path FROM photos WHERE session_id=?)`, from, to); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`UPDATE photos SET session_id=? WHERE session_id=?`, to, from)
+	if err != nil {
+		return 0, err
+	}
+	moved, _ := res.RowsAffected()
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE id=?`, from); err != nil {
+		return 0, err
+	}
+	return moved, tx.Commit()
+}
+
+// SetSessionDirs 更新会话的源目录集合（多目录合并后用 ";" 连接）
+func (s *Store) SetSessionDirs(id, dirs string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET source_dir=? WHERE id=?`, dirs, id)
+	return err
+}
+
+// RefreshSessionCounts 依据 photos 表重算会话 total/done（并入新目录后调用）
+func (s *Store) RefreshSessionCounts(id string) error {
+	_, err := s.db.Exec(`UPDATE sessions SET
+		total=(SELECT COUNT(*) FROM photos WHERE session_id=?),
+		done=(SELECT COUNT(*) FROM photos WHERE session_id=? AND status IN ('scored','parse_fail','failed','bad_image','unsupported','duplicate'))
+		WHERE id=?`, id, id, id)
+	return err
 }
 
 // ListSessions 全部会话（新→旧）

@@ -120,10 +120,11 @@ func (b *Bus) Publish(ev Event) {
 
 // StartOpts 启动参数
 type StartOpts struct {
-	Dir      string   `json:"dir"`
-	Model    string   `json:"model"`     // 为空取配置默认
-	SampleN  int      `json:"sample_n"`  // 抽样试跑数量，0=全量
-	ForceNew bool     `json:"force_new"` // 强制新建会话（不续跑）
+	Dir      string   `json:"dir"`      // 源目录（可含 ; / ；/ 换行分隔的多目录，等价于 Dirs）
+	Dirs     []string `json:"dirs"`     // 多目录：合并为一个批次（一条照片队列）
+	Model    string   `json:"model"`    // 为空取配置默认
+	SampleN  int      `json:"sample_n"` // 抽样试跑数量，0=全量
+	ForceNew bool     `json:"force_new"` // 强制新建批次（不续跑、不并入运行中批次）
 	Formats  []string `json:"formats"`   // 格式白名单（空=全部支持格式；如 ["jpg","jpeg","png"]）
 	Night    bool     `json:"night"`     // 夜间评分模式：失败照片轮末重新入队，循环重试直到全部成功
 	Models   []string `json:"models"`    // 多模型对比：≥2 个模型并行评同一张；首个为主模型（入正记录），其余进评分历史
@@ -293,7 +294,8 @@ func (e *Engine) estCost(model string) float64 {
 type StartResult struct {
 	SessionID string `json:"session_id"`
 	Resumed   bool   `json:"resumed"` // 是否续跑未完成的批次
-	Pending   int    `json:"pending"` // 续跑时剩余待处理张数
+	Merged    bool   `json:"merged"`  // 是否并入运行中的批次（一条照片队列，不再按目录分批次）
+	Pending   int    `json:"pending"` // 续跑/并入时剩余待处理张数
 	Model     string `json:"model"`   // 本批次实际使用的模型（批次内锁定）
 }
 
@@ -301,7 +303,7 @@ type StartResult struct {
 // 同目录存在未完成批次时自动续跑（只处理剩余的）。校验同步返回错误，执行异步进行。
 func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	cfg := e.cfgFn()
-	if opts.Dir == "" {
+	if len(effectiveDirs(opts)) == 0 {
 		return nil, errors.New("缺少源图目录")
 	}
 	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
@@ -358,13 +360,30 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 		return nil, errors.New("未选择打分模型：请在运行页选择模型或到设置页配置默认模型")
 	}
 
-	items, _, err := e.Scan(opts.Dir, opts.Formats)
-	if err != nil {
-		return nil, err
+	// 目录集合：多目录合并为一个批次（Dirs 优先；兼容 Dir 里 ; / ；/ 换行分隔）
+	dirs := effectiveDirs(opts)
+	if len(dirs) == 0 {
+		return nil, errors.New("未指定目录")
+	}
+	// 逐目录扫描并合并清单（跨目录按内容指纹去重）
+	var entries []scanEntry
+	seenFP := map[string]bool{}
+	for _, d := range dirs {
+		its, _, err := e.Scan(d, opts.Formats)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range its {
+			if seenFP[it.FP] {
+				continue
+			}
+			seenFP[it.FP] = true
+			entries = append(entries, scanEntry{it: it, base: d})
+		}
 	}
 	live := 0
-	for _, it := range items {
-		if !it.Dup {
+	for _, en := range entries {
+		if !en.it.Dup {
 			live++
 		}
 	}
@@ -379,7 +398,7 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	// 成本护栏：批次上限 + 每日上限
 	if e.estCost(model) > 0 {
 		if cfg.Cost.BatchLimit > 0 && estCost > cfg.Cost.BatchLimit {
-			return nil, fmt.Errorf("预估费用 ¥%.2f 超过单批次上限 ¥%.2f（可先抽样试跑或在设置调整上限）", estCost, cfg.Cost.BatchLimit)
+			return nil, fmt.Errorf("预估费用 ¥%.2f 超过单批次上限 ¥%.2f（可先抽样试跑或在设置调整）", estCost, cfg.Cost.BatchLimit)
 		}
 		day := time.Now().Format("2006-01-02")
 		spent, _ := e.store.SpendToday(day)
@@ -388,38 +407,69 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 		}
 	}
 
-	// 会话：续跑或新建
+	// ---------- 运行中：并入当前批次 ----------
+	// 只有一条照片队列，不再按目录分批次：新目录的照片直接追加进运行中批次的
+	// 投料队列，各模型池接着评（压缩缓存复用，已评过的走缓存秒过）。
+	// force_new 例外：明确要求独立批次时走下面的新建+排队路径。
+	if e.running.Load() && !opts.ForceNew {
+		rp := e.pools.Load()
+		if rp == nil {
+			return nil, errors.New("任务正在切换，请稍后重试")
+		}
+		sessID := e.CurrentSession()
+		rp.work.beginAppend() // 标记「正在并入」：投料队列暂空也不会被判收尾
+		defer rp.work.endAppend()
+		if !opts.ForceNew {
+			e.mergeSessionsInto(dirs, sessID) // 这些目录之前的未完成批次并入当前批次
+		}
+		e.registerPhotos(sessID, entries)
+		pend := e.pendingPhotosUnderDirs(sessID, dirs)
+		if opts.SampleN > 0 && opts.SampleN < len(pend) {
+			pend = pend[:opts.SampleN]
+		}
+		if len(pend) > 0 {
+			if err := e.AddPhotosToRunning(pend); err != nil {
+				return nil, err
+			}
+		}
+		_ = e.store.RefreshSessionCounts(sessID)
+		e.store.SetSessionDirs(sessID, e.sessionDirsJoined(sessID, dirs))
+		logutil.Info("并入当前批次 %s：%d 个目录 %d 张待评分", sessID, len(dirs), len(pend))
+		return &StartResult{SessionID: sessID, Resumed: true, Merged: true, Pending: len(pend), Model: model}, nil
+	}
+
+	// ---------- 空闲：合并为一个批次后入队 ----------
 	var sess *store.Session
 	if !opts.ForceNew {
-		sess, _ = e.store.FindResumableSession(opts.Dir)
+		// 与这些目录相关的未完成批次：取最新一个作基准，其余并入（目录合并为一个批次）
+		if cands, err := e.store.FindResumableSessionsForDirs(dirs); err == nil && len(cands) > 0 {
+			sess = cands[0]
+			e.RemoveQueued(sess.ID) // 若已在队列里：先摘掉，稍后统一重新入队（避免重复跑）
+			for _, other := range cands[1:] {
+				if n, err := e.store.MergeSessionInto(other.ID, sess.ID); err == nil && n > 0 {
+					logutil.Info("目录合并：批次 %s 并入 %s（%d 张）", other.ID, sess.ID, n)
+					e.RemoveQueued(other.ID)
+				}
+			}
+		}
 	}
 	sessID := ""
 	if sess != nil {
 		sessID = sess.ID
-		e.store.UpdateSessionStatus(sessID, store.SessionRunning, len(items), sess.Done)
+		e.store.UpdateSessionStatus(sessID, store.SessionRunning, len(entries), sess.Done)
 		logutil.Info("续跑会话 %s（已完成 %d）", sessID, sess.Done)
 	} else {
 		sessID = newSessionID()
-		if err := e.store.CreateSession(sessID, opts.Dir, model, scorer.PromptVersion); err != nil {
+		if err := e.store.CreateSession(sessID, strings.Join(dirs, ";"), model, scorer.PromptVersion); err != nil {
 			return nil, err
 		}
 	}
 
 	// 登记清单；内容已变更的照片重置状态
-	for _, it := range items {
-		status := store.StatusPending
-		if it.Dup {
-			status = store.StatusDuplicate
-		} else if compress.UnsupportedExts[strings.ToLower(filepath.Ext(it.Path))] {
-			status = store.StatusUnsupported // HEIC/RAW：登记但不支持
-		}
-		id, err := e.store.UpsertPhoto(&store.Photo{
-			SessionID: sessID, Fingerprint: it.FP, SrcPath: it.Path,
-			Filename: it.Filename, RelPath: relPath(opts.Dir, it.Path), Size: it.Size, Status: status,
-		})
-		if err == nil && status == store.StatusPending {
-			e.resetIfChanged(id, it.FP)
-		}
+	e.registerPhotos(sessID, entries)
+	if sess != nil {
+		e.store.SetSessionDirs(sessID, e.sessionDirsJoined(sessID, dirs))
+		_ = e.store.RefreshSessionCounts(sessID)
 	}
 
 	resumed := sess != nil
@@ -440,6 +490,114 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	}
 	e.enqueue(sessID, opts, model)
 	return &StartResult{SessionID: sessID, Resumed: resumed, Pending: pending, Model: model}, nil
+}
+
+// scanEntry 扫描项 + 所属根目录（登记时算相对路径用）
+type scanEntry struct {
+	it   *ScanItem
+	base string
+}
+
+// effectiveDirs 目录集合：Dirs 优先；否则把 Dir 按 ; / ；/ 换行拆开（去重保序）
+func effectiveDirs(opts StartOpts) []string {
+	raw := opts.Dirs
+	if len(raw) == 0 && strings.TrimSpace(opts.Dir) != "" {
+		raw = strings.FieldsFunc(opts.Dir, func(r rune) bool {
+			return r == ';' || r == '；' || r == '\n' || r == '\r'
+		})
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range raw {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// registerPhotos 把扫描清单登记进会话（内容已变更的重置为待处理）
+func (e *Engine) registerPhotos(sessID string, entries []scanEntry) {
+	for _, en := range entries {
+		status := store.StatusPending
+		if en.it.Dup {
+			status = store.StatusDuplicate
+		} else if compress.UnsupportedExts[strings.ToLower(filepath.Ext(en.it.Path))] {
+			status = store.StatusUnsupported // HEIC/RAW：登记但不支持
+		}
+		id, err := e.store.UpsertPhoto(&store.Photo{
+			SessionID: sessID, Fingerprint: en.it.FP, SrcPath: en.it.Path,
+			Filename: en.it.Filename, RelPath: relPath(en.base, en.it.Path), Size: en.it.Size, Status: status,
+		})
+		if err == nil && status == store.StatusPending {
+			e.resetIfChanged(id, en.it.FP)
+		}
+	}
+}
+
+// mergeSessionsInto 把与这些目录相关的未完成批次并入目标批次（目录合并为一个队列）
+func (e *Engine) mergeSessionsInto(dirs []string, target string) {
+	cands, err := e.store.FindResumableSessionsForDirs(dirs)
+	if err != nil {
+		return
+	}
+	for _, s := range cands {
+		if s.ID == target {
+			continue
+		}
+		if n, err := e.store.MergeSessionInto(s.ID, target); err == nil && n > 0 {
+			logutil.Info("目录合并：批次 %s 并入当前批次 %s（%d 张）", s.ID, target, n)
+			e.RemoveQueued(s.ID) // 该批次（若在排队）已并入，不能再按独立批次跑
+		}
+	}
+}
+
+// pendingPhotosUnderDirs 会话内这些目录下尚未完成的照片（并入当前批次用）
+func (e *Engine) pendingPhotosUnderDirs(sessID string, dirs []string) []*store.Photo {
+	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20, "", "", "", "", -1, -1)
+	if err != nil {
+		return nil
+	}
+	prefixes := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		prefixes = append(prefixes, strings.ToLower(strings.ReplaceAll(strings.TrimRight(d, "\\/"), "\\", "/"))+"/")
+	}
+	var out []*store.Photo
+	for _, p := range photos {
+		if isFinalStatus(p.Status) {
+			continue
+		}
+		key := strings.ToLower(strings.ReplaceAll(p.SrcPath, "\\", "/"))
+		for _, pre := range prefixes {
+			if strings.HasPrefix(key, pre) {
+				out = append(out, p)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// sessionDirsJoined 会话已有的目录集合与新增目录合并（去重保序，";" 连接）
+func (e *Engine) sessionDirsJoined(sessID string, add []string) string {
+	var all []string
+	if s, err := e.store.GetSession(sessID); err == nil && s != nil {
+		all = append(all, effectiveDirs(StartOpts{Dir: s.SourceDir})...)
+	}
+	seen := map[string]bool{}
+	for _, d := range all {
+		seen[d] = true
+	}
+	for _, d := range add {
+		if !seen[d] {
+			seen[d] = true
+			all = append(all, d)
+		}
+	}
+	return strings.Join(all, ";")
 }
 
 // enqueue 任务入队；空闲则立即启动
@@ -1017,6 +1175,7 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
 
 	ready := newReadyList()
+	work := newWorkQueue(compressQueue) // 压缩投料队列：运行中可并入新目录的照片
 	scDesired := atomic.Int64{}
 	ccDesired := atomic.Int64{}
 	compressJobs := make(chan *store.Photo) // 无缓冲：投料节奏跟随压缩 worker，动态扩容窗口覆盖整个压缩阶段
@@ -1024,11 +1183,12 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	var stopFlag atomic.Bool
 	var compressWG sync.WaitGroup
 	var compressN atomic.Int64
+	var compressInflight atomic.Int64 // 已从投料队列取出、尚未压完（成功或失败）的张数
 	var compressClosed bool
 	var poolMu sync.Mutex // 保护 compressClosed / 压缩池扩容
 	doneCount := atomic.Int64{}
 
-	rp := &runPools{ready: ready, planned: int64(len(compressQueue))}
+	rp := &runPools{ready: ready, work: work, planned: int64(len(compressQueue))}
 	rp.compress.total.Store(int64(len(compressQueue)))
 	e.pools.Store(rp)
 	defer e.pools.Store(nil)
@@ -1232,10 +1392,12 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 			defer compressN.Add(-1)
 			for p := range compressJobs {
 				if ctx.Err() != nil {
+					compressInflight.Add(-1)
 					stopFlag.Store(true)
 					continue
 				}
 				cp, err := eng.ToCache(p.SrcPath, p.Fingerprint, cacheDir)
+				compressInflight.Add(-1)
 				if err != nil {
 					logutil.Info("压缩失败 %s: %v", p.Filename, err)
 					e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
@@ -1328,22 +1490,63 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 		}
 	}()
 
-	// 投料：压缩队列逐张派发给压缩池（暂停时挂起派发）
-producer:
-	for _, p := range compressQueue {
-		if !e.waitIfPaused(ctx) {
-			stopFlag.Store(true)
-			break producer
+	// 投料：从可追加的投料队列逐张派发给压缩池（暂停时挂起派发）。
+	// 运行中并入的新目录照片会陆续追加进来，压缩池接着压、模型池接着评。
+	producerQuit := make(chan struct{})
+	var producerWG sync.WaitGroup
+	producerWG.Add(1)
+	go func() {
+		defer producerWG.Done()
+		for {
+			if !e.waitIfPaused(ctx) {
+				stopFlag.Store(true)
+				return
+			}
+			p, ok := work.next(ctx, &stopFlag, producerQuit)
+			if !ok {
+				return
+			}
+			compressInflight.Add(1)
+			select {
+			case <-ctx.Done():
+				stopFlag.Store(true)
+				return
+			case <-producerQuit:
+				return
+			case compressJobs <- p:
+			}
 		}
-		select {
-		case <-ctx.Done():
-			stopFlag.Store(true)
-			break producer
-		case compressJobs <- p:
+	}()
+	// 收尾判定：投料队列取尽（且无正在并入的目录）+ 无「已取出未压完」+ 各池都取到
+	// 清单末尾（停止/致命的池不等）。运行中并入新目录会自然把批次延长。
+	drained := func() bool {
+		if ctx.Err() != nil {
+			return true
 		}
+		if !work.empty() || compressInflight.Load() > 0 {
+			return false
+		}
+		rp.mu.Lock()
+		defer rp.mu.Unlock()
+		sz := int64(ready.size())
+		for _, pool := range rp.pools {
+			if pool.halted() {
+				continue
+			}
+			if pool.inflight.Load() > 0 || pool.cursor.Load() < sz {
+				return false
+			}
+		}
+		return true
 	}
-	// 收尾：冻结压缩池扩容并关压缩通道 → 压缩排干 → 清单标记结束（各池 worker 取尽
-	// 后自行退出）→ 等所有池（含运行中追加的）收尾 → 停 supervisor。
+	for !drained() {
+		if ctx.Err() != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	close(producerQuit)
+	producerWG.Wait()
 	poolMu.Lock()
 	compressClosed = true
 	close(compressJobs)

@@ -222,11 +222,11 @@
         </div>
       </div>
 
-      <!-- 排队中的目录：当前评分完成后自动开始 -->
+      <!-- 队列：只按照片说话（运行中默认并入当前批次，这里通常是「新建批次」排在后面） -->
       <div v-for="q in queuedDirs" :key="q.sid" class="row" style="align-items: center; gap: 8px; margin-bottom: 4px">
-        <span class="tag">⏳ 排队</span>
-        <span class="muted" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="q.dir">{{ q.label }}</span>
-        <span class="muted">{{ q.waiting ? `${q.waiting} 张待评分，` : '' }}等待当前评分完成后自动开始</span>
+        <span class="tag">⏳ 队列</span>
+        <span class="muted">{{ q.waiting ? `${q.waiting} 张待评分` : '待评分' }}，当前批次完成后自动开始</span>
+        <span v-if="q.dir" class="muted" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap" :title="q.dir">（{{ q.label }}）</span>
         <button class="btn plain small danger-text" @click="removeQueued(q.sid)">🗑 移除</button>
       </div>
 
@@ -522,10 +522,11 @@ const waitingCount = computed(() => {
   }
   return n
 })
+// 队列：只按「照片队列」说话——显示剩余张数，不再以目录为单位
 const queuedDirs = computed(() => state.queue.queued.map((sid) => {
   const t = state.tasks[sid] || {}
   const dir = t.dir || ''
-  return { sid, dir, label: dir ? shortDirLabel(dir) : '待评分目录', waiting: t.total ? Math.max(0, t.total - (t.finalN || 0)) : 0 }
+  return { sid, dir, label: dir ? shortDirLabel(dir) : '待评分队列', waiting: t.total ? Math.max(0, t.total - (t.finalN || 0)) : 0 }
 }))
 function shortDirLabel(d) {
   const parts = String(d).split(/[\\/]/).filter(Boolean)
@@ -825,7 +826,8 @@ async function doStart(sample) {
   }
   starting.value = true
   try {
-    // 多目录：逐目录提交，依次进入排队（队列模型天然承接）
+    // 多目录：合并为一个批次（一条照片队列）提交；运行中提交则并入当前批次，
+    // 各模型池接着评（不再按目录分批次、模型不空等）
     const dirs = parseDirs()
     // 多模型对比：主模型 + 同平台对比 + 跨平台对比（总计至少 2 个才启用）
     let models
@@ -839,30 +841,28 @@ async function doStart(sample) {
         return
       }
     }
-    let resumed = 0, queued = 0, first = null
-    for (const d of dirs) {
-      const r = await api('/api/start', {
-        method: 'POST',
-        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models, cross_models: crossModels, force_new: forceNew.value }),
-      })
-      const t = taskOf(r.session_id)
-      t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
-      t.dir = d // 排队目录名（队列视图展示用）
-      // 入队即登记该目录的图片数（待评分计数包含排队目录；失败静默，开始后 stage 会再给）
-      api(`/api/photos?session=${r.session_id}&page_size=1`).then((rr) => { if (rr.total) t.total = rr.total }).catch(() => {})
-      if (r.resumed) resumed++
-      if (state.queue.queued.includes(r.session_id)) queued++
-      if (!first) first = r
-    }
+    const r = await api('/api/start', {
+      method: 'POST',
+      body: JSON.stringify({ dirs, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models, cross_models: crossModels, force_new: forceNew.value }),
+    })
+    const first = r
+    const t = taskOf(r.session_id)
+    t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」
+    t.dir = dirs.join('；') // 仅供展示（悬停查看）
+    // 登记本批次图片数（待评分计数；失败静默，开始后 stage 会再给）
+    api(`/api/photos?session=${r.session_id}&page_size=1`).then((rr) => { if (rr.total) t.total = rr.total }).catch(() => {})
+    const queued = state.queue.queued.includes(r.session_id)
     state.currentModel = (first && first.model) || state.currentModel
     const nightTag = nightMode.value && !sample ? '🔁 自动重试：' : ''
-    if (dirs.length > 1) {
-      toast(`${nightTag}已提交 ${dirs.length} 个目录${queued ? `（${queued} 个排队中` : ''}${resumed ? `${queued ? '，' : '（'}${resumed} 个续跑${queued ? '' : '）'}` : ''}）`)
+    if (r.merged) {
+      toast(`${nightTag}已并入当前批次：${dirs.length} 个目录，新增 ${r.pending} 张待评分（模型池接着评，压缩缓存复用）`)
     } else if (first.resumed) {
       toast(`${nightTag}继续上次：剩余 ${first.pending} 张待评分${queued ? '，已排队' : ''}`)
+    } else if (queued) {
+      toast(`${nightTag}已加入队列（前面还有 ${state.queue.queued.indexOf(first.session_id)} 个批次）`)
+    } else {
+      toast(`${nightTag}开始评分（${dirs.length > 1 ? `${dirs.length} 个目录合并为一条队列，` : ''}模型 ${first.model}${models && (models.length + (crossModels ? crossModels.length : 0)) > 1 ? ` +${models.length - 1 + (crossModels ? crossModels.length : 0)} 对比` : ''}）`)
     }
-    else if (queued) toast(`${nightTag}已加入排队（前面还有 ${state.queue.queued.indexOf(first.session_id)} 个目录）`)
-    else toast(`${nightTag}开始评分（模型 ${first.model}${models && (models.length + (crossModels ? crossModels.length : 0)) > 1 ? ` +${models.length - 1 + (crossModels ? crossModels.length : 0)} 对比` : ''}）`)
     refreshState()
   } catch (e) {
     toast(e.message, true)
