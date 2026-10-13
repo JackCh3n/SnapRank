@@ -1077,6 +1077,16 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 		}
 	}
 
+	// 致命错误（批次锁定模型在当前平台不存在）：中止本批次但保留排队任务
+	// （后续批次可能锁定的是别的模型，仍应继续跑）；只上报一次
+	var fatalOnce sync.Once
+	fatalAbort := func(reason string) {
+		fatalOnce.Do(func() {
+			logutil.Error("%s", reason)
+			e.abortTask(reason)
+		})
+	}
+
 	// 目标模型 worker：独立消费本模型队列，waitIfPaused 同时承担取消判断
 	spawnTarget := func(ti int) {
 		targetN[ti].Add(1)
@@ -1093,6 +1103,9 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 				}
 				cp := filepath.Join(cacheDir, compress.CacheName(p.Fingerprint))
 				o := e.scoreModel(ctx, tg.prov, tg.model, tg.label, p, cp)
+				if o.fatal {
+					fatalAbort(fmt.Sprintf("批次锁定的模型 %s 在当前平台不可用，已中止本批次（其余排队任务不受影响）：%s", tg.model, o.errDetail))
+				}
 				statesMu.Lock()
 				st := states[p.ID]
 				statesMu.Unlock()
@@ -1292,6 +1305,7 @@ type modelOutcome struct {
 	errDetail string
 	cached    bool
 	clamped   bool
+	fatal     bool // 批次锁定模型在当前平台不存在（404）：应中止整批而非逐张失败
 }
 
 // scoreModel 用单个模型评一张（缓存优先，含重试退避）。
@@ -1325,7 +1339,7 @@ func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, 
 	for {
 		attempts++
 		content, err = prov.Score(ctx, model, req)
-		if err == nil || errors.Is(err, provider.ErrModelNoVision) || ctx.Err() != nil || attempts >= 3 {
+		if err == nil || errors.Is(err, provider.ErrModelNoVision) || errors.Is(err, provider.ErrModelNotFound) || ctx.Err() != nil || attempts >= 3 {
 			break
 		}
 		backoff := time.Duration(1<<attempts) * time.Second // 2s / 4s
@@ -1343,6 +1357,11 @@ func (e *Engine) scoreModel(ctx context.Context, prov provider.Provider, model, 
 	if err != nil {
 		if errors.Is(err, provider.ErrModelNoVision) {
 			err = fmt.Errorf("%w（请在模型下拉更换视觉模型）", err)
+		}
+		if errors.Is(err, provider.ErrModelNotFound) {
+			// 批次锁定模型在当前平台不存在：重试无意义，交由流水线中止整批
+			return modelOutcome{status: store.StatusFailed, fatal: true,
+				errDetail: truncate(fmt.Sprintf("模型 %s 在当前平台不存在或无权限：%s", model, err.Error()), 300)}
 		}
 		return modelOutcome{status: store.StatusFailed, errDetail: truncate(err.Error(), 300)}
 	}
@@ -1379,6 +1398,18 @@ func readB64(path string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// abortTask 中止当前任务（保留排队任务）：批次锁定模型不可用这类致命错误用。
+// 与 Stop 的区别是不清空队列——后续批次可能锁定别的（可用）模型，仍应继续跑。
+func (e *Engine) abortTask(reason string) {
+	e.mu.Lock()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": reason}})
 }
 
 // Stop 停止当前任务（已提交请求跑完，不再新增）

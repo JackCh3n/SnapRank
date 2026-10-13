@@ -97,7 +97,12 @@
           <input v-model="compareMode" type="checkbox" />
           <span>⚖️ 多模型对比</span>
         </label>
-        <span class="muted">失败自动重试：排到队尾重试（间隔 15s）直到全部成功；多模型对比：至少 2 个模型同时评同一张</span>
+        <label class="field row" style="flex-direction: row; align-items: center; gap: 6px"
+          title="不续跑该目录已有的批次，直接新建一个批次（用当前选的模型）。已有批次锁定的是旧模型（如换了平台后模型不存在）时用它脱困；同模型已评过的照片走缓存不重复扣费">
+          <input v-model="forceNew" type="checkbox" />
+          <span>🆕 新建批次</span>
+        </label>
+        <span class="muted">失败自动重试：排到队尾重试（间隔 15s）直到全部成功；多模型对比：至少 2 个模型同时评同一张；新建批次：忽略旧批次（旧批次锁定模型不可用时用）</span>
       </div>
       <div v-if="compareMode" class="row" style="margin-top: 8px; align-items: flex-start">
         <label class="field grow">
@@ -260,6 +265,7 @@ function applyManualModel() {
 }
 const picking = ref(false)
 const formatPreset = ref('jpg') // 默认仅 JPG：RAW/HEIC 伴生文件会登记为无法处理，多数用户只评成片
+const forceNew = ref(false)     // 新建批次：忽略该目录已有批次（旧批次锁定模型不可用时脱困）
 
 const PRESETS = {
   '': [],
@@ -690,7 +696,13 @@ async function loadModels() {
   const m = await refreshModels()
   loadingModels.value = false
   if (m.vision.length === 0) toast('未发现视觉模型，可到设置调整识别规则', true)
-  else if (!m.vision.includes(state.selModel)) state.selModel = m.vision[0]
+  else if (!m.vision.includes(state.selModel)) {
+    // 切换平台后原选模型不在新列表里：自动改选列表第一个，必须让用户看见
+    // （静默替换曾导致旧平台的模型名被带进新平台，整批 404）
+    const prev = state.selModel
+    state.selModel = m.vision[0]
+    if (prev) toast(`已自动改选主模型：${prev} → ${state.selModel}（原模型不在当前平台列表）`)
+  }
 }
 
 // 开始评分：任务创建后立即返回（后台排队执行），可继续添加新任务
@@ -730,7 +742,7 @@ async function doStart(sample) {
     for (const d of dirs) {
       const r = await api('/api/start', {
         method: 'POST',
-        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models, cross_models: crossModels }),
+        body: JSON.stringify({ dir: d, sample_n: sample ? 10 : 0, formats: formatsArg.value, night: nightMode.value && !sample, models, cross_models: crossModels, force_new: forceNew.value }),
       })
       const t = taskOf(r.session_id)
       t.autoRetry = nightMode.value && !sample // feed 里失败行显示「将重新排队」

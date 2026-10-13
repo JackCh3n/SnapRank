@@ -30,6 +30,10 @@ var ErrRateLimit = errors.New("rate limited (429)")
 // ErrModelNoVision 模型不支持图片输入
 var ErrModelNoVision = errors.New("model does not support image input")
 
+// ErrModelNotFound 模型在当前平台不存在或无权限（404）：批次锁定的模型换了平台后
+// 每张照片都会撞同一堵墙，流水线据此快速失败，不再反复重试整批
+var ErrModelNotFound = errors.New("model not found on current platform")
+
 // ScoreRequest 单次评分请求
 type ScoreRequest struct {
 	ImageB64  string // data URI 前缀由 Provider 拼接
@@ -182,6 +186,9 @@ func classifyErr(err error) error {
 		}
 		if apiErr.HTTPStatusCode == 400 && (strings.Contains(apiErr.Message, "image") || strings.Contains(apiErr.Message, "多模态") || strings.Contains(apiErr.Message, "vision")) {
 			return fmt.Errorf("%w: %s", ErrModelNoVision, apiErr.Message)
+		}
+		if apiErr.HTTPStatusCode == 404 && strings.Contains(strings.ToLower(apiErr.Message), "model") {
+			return fmt.Errorf("%w: %s", ErrModelNotFound, apiErr.Message)
 		}
 	}
 	return err
@@ -338,7 +345,11 @@ func (a *AnthropicProvider) Score(ctx context.Context, model string, req ScoreRe
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("messages %d: %s", resp.StatusCode, truncateStr(string(raw), 200))
+		msg := truncateStr(string(raw), 200)
+		if resp.StatusCode == 404 && strings.Contains(strings.ToLower(msg), "model") {
+			return "", fmt.Errorf("%w: %s", ErrModelNotFound, msg)
+		}
+		return "", fmt.Errorf("messages %d: %s", resp.StatusCode, msg)
 	}
 	var out anthropicResp
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -401,6 +412,10 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 	defer func() { logutil.Info("[评分] %s 完成，耗时 %dms（mock）", model, time.Since(start).Milliseconds()) }()
 	if strings.Contains(strings.ToUpper(req.Filename), "BADJSON") {
 		return `哎呀，这张照片感觉 {一般吧}`, nil
+	}
+	// 测试触发器：模型名含 MISSING 时模拟平台「模型不存在」404，用于离线验证快速失败
+	if strings.Contains(strings.ToUpper(model), "MISSING") {
+		return "", fmt.Errorf("%w: The model %q does not exist or you do not have access to it.", ErrModelNotFound, model)
 	}
 	h := fnv.New64a()
 	h.Write([]byte(req.ImageB64[:min(2048, len(req.ImageB64))]))
