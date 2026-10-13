@@ -26,7 +26,7 @@ export const state = reactive({
   forcedFiles: new Set(),      // 强制评分标记：`session|文件名`（重评/复检入队的图片，忽略缓存重调）
   retryFiles: new Set(),       // 自动重试标记：`session|文件名`（失败后重新排队的图片）
   scoreFeed: [],               // 最近评完的 10 条（跨任务滚动，仅作展示）
-  tally: { done: 0, fail: 0 }, // 本页面会话累计：已评完 / 失败张数
+  tally: { done: 0, fail: 0, other: 0 }, // 本页面会话累计：已评完 / 失败 / 无法处理（不支持/损坏/重复）
   lastDone: null,              // 最近一次完成事件 {stopped, session}：停止后剩余张数展示用
   toast: null,
 })
@@ -189,6 +189,7 @@ export function connectSSE() {
     // 全局累计与「最近评完」滚动列表（运行页只展示待评分 + 最近 10 条）
     if (d.status === 'scored') state.tally.done++
     else if (d.status === 'failed' || d.status === 'parse_fail') state.tally.fail++
+    else if (d.status === 'unsupported' || d.status === 'bad_image' || d.status === 'duplicate') state.tally.other++
     if (FINAL_STATUS.has(d.status)) {
       state.scoreFeed.push({ file: d.file, status: d.status, score: d.score, error: d.error, cached: d.cached, session_id: d.session_id, photo_id: d.photo_id })
       if (state.scoreFeed.length > 10) state.scoreFeed.splice(0, state.scoreFeed.length - 10)
@@ -220,6 +221,16 @@ export function connectSSE() {
     // 不在此处 refreshState：done 与下一个任务的 queue 事件之间有一个引擎复位间隙，
     // 拉取到的 running=false 会覆盖随后到达的实时队列事件（推/拉竞态），
     // 导致下一个任务明明在跑前端却显示「本轮已评完」。队列状态只信 SSE 事件流。
+    // 但 tally 要对账：SSE 事件可能因刷新/重连丢失，以数据库实际计数抬底
+    api(`/api/summary?session=${d.session_id}`).then((sum) => {
+      if (!sum || !sum.status) return
+      const dbDone = sum.status.scored || 0
+      const dbFail = (sum.status.parse_fail || 0) + (sum.status.failed || 0)
+      const dbOther = (sum.status.unsupported || 0) + (sum.status.bad_image || 0) + (sum.status.duplicate || 0)
+      if (dbDone > state.tally.done) state.tally.done = dbDone
+      if (dbFail > state.tally.fail) state.tally.fail = dbFail
+      if (dbOther > state.tally.other) state.tally.other = dbOther
+    }).catch(() => {})
     if (d.stopped) {
       toast('已停止：未评完的图片下次开始时自动继续')
       notifyDesktop('SnapRank 评分已停止', '未评完的图片下次继续')

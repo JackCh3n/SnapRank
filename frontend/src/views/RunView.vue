@@ -151,6 +151,7 @@
         <div>
           <b>⏳ 待评分 {{ waitingCount }}</b> 张 · <b>✅ 已评完 {{ state.tally.done }}</b> 张
           <span v-if="state.tally.fail" class="error-text">· ❌ 失败{{ autoRetry ? '待重试' : '' }} {{ state.tally.fail }}</span>
+          <span v-if="state.tally.other" class="muted" title="格式不支持（RAW/HEIC）、解码失败或批内重复的照片——已跳过不评分">· ⏭ 无法处理 {{ state.tally.other }}</span>
         </div>
         <span class="row" style="gap: 8px; align-items: center">
           <span class="eta" v-if="etaText">{{ etaText }}</span>
