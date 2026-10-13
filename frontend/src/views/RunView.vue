@@ -68,10 +68,16 @@
         <label class="field grow">
           视觉模型（在线拉取）
           <select v-model="state.selModel">
-            <option v-for="m in state.models.vision" :key="m" :value="m">{{ m }}</option>
-            <option v-if="!state.models.vision.includes(state.selModel) && state.selModel" :value="state.selModel">{{ state.selModel }}（当前）</option>
+            <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
+            <option v-if="!modelOptions.includes(state.selModel) && state.selModel" :value="state.selModel">{{ state.selModel }}（当前）</option>
           </select>
         </label>
+        <label class="field row" style="flex-direction: row; align-items: center; gap: 6px"
+          title="关闭后显示平台全部模型（识别规则只是猜测，部分视觉模型可能被误过滤）">
+          <input v-model="showAllModels" type="checkbox" /> 全部
+        </label>
+        <input v-model="manualModel" style="width: 170px" placeholder="或手动输入模型 ID（无清单接口的平台）"
+          title="部分平台（如天翼）没有模型清单接口，直接输入模型 ID 回车即选中" @keyup.enter="applyManualModel" />
         <button class="btn plain" :disabled="loadingModels" @click="loadModels">
           {{ loadingModels ? '拉取中…' : '刷新模型列表' }}
         </button>
@@ -204,6 +210,16 @@ import { state, taskOf, api, toast, refreshState, refreshModels, requestNotifyPe
 import { confirmDialog } from '../confirm.js'
 
 const loadingModels = ref(false)
+const showAllModels = ref(false) // false=仅视觉过滤后的模型；true=平台全部模型
+const manualModel = ref('') // 无清单接口平台（如天翼）手动输入模型 ID
+const modelOptions = computed(() => (showAllModels.value ? state.models.all : state.models.vision) || [])
+function applyManualModel() {
+  const m = manualModel.value.trim()
+  if (!m) return
+  state.selModel = m
+  manualModel.value = ''
+  toast(`已选择模型：${m}（下次开始时生效）`)
+}
 const picking = ref(false)
 const formatPreset = ref('')
 
