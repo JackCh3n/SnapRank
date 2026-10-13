@@ -205,19 +205,20 @@
           </span>
         </div>
         <!-- 运行中追加模型：复用已压缩缓存，从第一张起评（额度不足/想换模型时用） -->
-        <div class="row" style="gap: 6px; align-items: center; margin-top: 8px" v-if="state.running">
+        <div class="row" style="gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap" v-if="state.running">
           <span class="muted">➕ 追加模型池（复用压缩缓存，从第一张起评）：</span>
-          <select v-model="addPoolPreset" style="width: 140px" title="平台预设；默认当前平台">
+          <select v-model="addPoolPreset" style="width: 130px" title="平台预设；默认当前平台">
             <option value="">当前平台</option>
             <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
           </select>
-          <input v-model="addPoolModel" list="pool-model-options" style="width: 190px"
-            placeholder="模型 ID（可下拉选或手输）" @keyup.enter="addPool" />
-          <datalist id="pool-model-options">
-            <option v-for="m in addPoolModelOptions" :key="m" :value="m" />
-          </datalist>
-          <button class="btn plain small" :disabled="!addPoolModel.trim() || addPoolLoading" @click="addPool">＋ 添加</button>
-          <span v-if="addPoolLoading" class="muted">拉取模型…</span>
+          <select v-model="addPoolSelect" style="width: 190px" :disabled="addPoolLoading"
+            title="该平台的视觉模型清单；没有清单接口的平台（如天翼）用手动输入">
+            <option value="">{{ addPoolLoading ? '拉取中…' : '选择模型…' }}</option>
+            <option v-for="m in addPoolModelOptions" :key="m" :value="m">{{ m }}</option>
+          </select>
+          <input v-model="addPoolManual" style="width: 170px" placeholder="或手动输入模型 ID"
+            title="手动输入的模型 ID 优先于下拉框选择" @keyup.enter="addPool" />
+          <button class="btn plain small" :disabled="!(addPoolSelect || addPoolManual.trim()) || addPoolLoading" @click="addPool">＋ 添加</button>
         </div>
       </div>
 
@@ -412,18 +413,21 @@ async function bumpConc(d) {
 
 // ---------- 模型池面板：单池暂停/继续/停止 + 运行中追加模型 ----------
 const addPoolPreset = ref('')
-const addPoolModel = ref('')
+const addPoolSelect = ref('')  // 下拉框选的模型 ID
+const addPoolManual = ref('')  // 手动输入的模型 ID（优先于下拉框）
 const addPoolModels = ref([])
 const addPoolLoading = ref(false)
 const addPoolModelOptions = computed(() => (addPoolPreset.value ? addPoolModels.value : state.models.vision || []))
 
 async function loadAddPoolModels() {
+  addPoolSelect.value = ''
   addPoolModels.value = []
-  if (!addPoolPreset.value) return
+  if (!addPoolPreset.value) return // 当前平台直接用已拉取的视觉模型清单
   addPoolLoading.value = true
   try {
     const r = await api('/api/preset/models', { method: 'POST', body: JSON.stringify({ name: addPoolPreset.value }) })
-    addPoolModels.value = r.models || []
+    addPoolModels.value = r.vision || []
+    if (!addPoolModels.value.length) toast('该平台未返回模型清单，可直接手动输入模型 ID')
   } catch (e) {
     toast('拉取该平台模型失败：' + e.message, true)
   }
@@ -432,13 +436,14 @@ async function loadAddPoolModels() {
 watch(addPoolPreset, loadAddPoolModels)
 
 async function addPool() {
-  const m = addPoolModel.value.trim()
+  const m = (addPoolManual.value.trim() || addPoolSelect.value || '').trim()
   if (!m) return
   try {
     const r = await api('/api/task/pool/add', { method: 'POST', body: JSON.stringify({ preset: addPoolPreset.value, model: m }) })
     state.pools = r.pools || state.pools
     toast(`已追加模型池：${addPoolPreset.value ? addPoolPreset.value + '/' + m : m}（复用压缩缓存，从第一张起评）`)
-    addPoolModel.value = ''
+    addPoolManual.value = ''
+    addPoolSelect.value = ''
   } catch (e) {
     toast(e.message, true)
   }
