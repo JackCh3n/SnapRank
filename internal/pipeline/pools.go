@@ -222,13 +222,17 @@ func (m *modelPool) errText() string {
 	return v
 }
 
-func (m *modelPool) failFatal(reason string) {
-	if m.fatal.Swap(true) {
-		return // 只上报一次
-	}
+// pauseWith 出错自动暂停：不彻底停掉该池，保留继续的机会。
+// 在途请求跑完即挂起，不影响其它池；照片定稿会等它——用户可点 ▶ 继续或 ■ 停止。
+func (m *modelPool) pauseWith(reason string) {
 	m.errMsg.Store(reason)
-	logutil.Error("模型池 %s 已停止（不影响其它池）：%s", m.label, reason)
+	m.paused.Store(true)
+	m.consec.Store(0) // 继续后重新计数（连错阈值重新给机会）
+	logutil.Info("模型池 %s 已自动暂停：%s（可在面板点 ▶ 继续，或 ■ 停止该池）", m.label, reason)
 }
+
+// clearErr 继续该池时清掉上次的错误提示
+func (m *modelPool) clearErr() { m.errMsg.Store("") }
 
 // ---------- 运行中池集合 ----------
 
@@ -375,6 +379,7 @@ func (e *Engine) ControlPool(label, action string) error {
 		logutil.Info("模型池已暂停: %s（在途请求跑完即挂起，其它池不受影响）", label)
 	case "resume":
 		target.paused.Store(false)
+		target.clearErr() // 清掉上次的出错提示（继续后重新计数）
 		logutil.Info("模型池已继续: %s", label)
 	case "stop":
 		target.stopped.Store(true)

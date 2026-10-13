@@ -390,8 +390,9 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	var seenMu sync.Mutex
 	var entries []scanEntry
 	idx := 0
+	scanBatch := e.initialScanSize() // 首批 = 并发×5：够各模型池同时开工即开跑
 	for idx < len(files) && len(entries) == 0 {
-		end := idx + initialScanBatch
+		end := idx + scanBatch
 		if end > len(files) {
 			end = len(files)
 		}
@@ -529,8 +530,17 @@ type ScanProgress struct {
 	Done      bool   `json:"done,omitempty"`
 }
 
-// initialScanBatch 首批指纹张数：先扫这么多就让任务开跑，其余后台继续扫并追加进队列
-const initialScanBatch = 50
+// initialScanFactor 首批指纹张数 = 评分并发 × 该系数（如并发 4 → 先扫 20 张就开跑）
+const initialScanFactor = 5
+
+// initialScanSize 首批指纹张数：并发数 × 5（并发越大首批越大，够各池同时开工）
+func (e *Engine) initialScanSize() int {
+	sc := e.cfgFn().Pipeline.ScoreConcurrency
+	if sc < 1 {
+		sc = 1
+	}
+	return sc * initialScanFactor
+}
 
 // scanChunk 后台扫描每登记这么多张就追加进运行中批次并推进度
 const scanChunk = 40
@@ -1563,27 +1573,12 @@ func (e *Engine) streamPools(ctx context.Context, rp *runPools, eng *compress.En
 				pool.inflight.Add(-1)
 				if o.status == store.StatusScored {
 					pool.consec.Store(0)
-				} else {
-					pool.consec.Add(1)
-				}
-				if o.fatal {
-					pool.failFatal(o.errDetail)
-					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已停止（不影响其它池）：%s", pool.label, o.errDetail)}})
-					e.publishPools()
-					return
-				}
-				if pool.consec.Load() >= poolConsecFailLimit {
-					reason := fmt.Sprintf("连续 %d 次调用失败（疑似额度不足或平台故障）", poolConsecFailLimit)
-					pool.failFatal(reason)
-					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已停止（不影响其它池）：%s", pool.label, reason)}})
-					e.publishPools()
-					return
-				}
-				if o.status == store.StatusScored {
 					pool.done.Add(1)
 				} else {
+					pool.consec.Add(1)
 					pool.fail.Add(1)
 				}
+				// 先记录本次结果并判定定稿（暂停/出错路径也不能丢这一张）
 				statesMu.Lock()
 				st := states[p.ID]
 				statesMu.Unlock()
@@ -1603,6 +1598,20 @@ func (e *Engine) streamPools(ctx context.Context, rp *runPools, eng *compress.En
 						// 后加入的池：照片已定稿，只把新评分并入合议平均
 						e.RecomputeAggregate(p.Fingerprint)
 					}
+				}
+				// 再看是否要自动暂停本池（模型不存在/额度耗尽/连续失败）——
+				// 暂停保留继续的机会，用户可点 ▶ 恢复或 ■ 停止
+				if o.fatal {
+					pool.pauseWith(o.errDetail)
+					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已自动暂停：%s——可点 ▶ 继续或 ■ 停止该池，其它池不受影响", pool.label, o.errDetail)}})
+					e.publishPools()
+					continue
+				}
+				if pool.consec.Load() >= poolConsecFailLimit {
+					pool.pauseWith(fmt.Sprintf("连续 %d 次调用失败（疑似额度不足或平台故障）", poolConsecFailLimit))
+					e.Bus.Publish(Event{Type: "error", Data: map[string]string{"error": fmt.Sprintf("模型池 %s 已自动暂停：连续 %d 次调用失败（疑似额度不足或平台故障）——可点 ▶ 继续或 ■ 停止该池，其它池不受影响", pool.label, poolConsecFailLimit)}})
+					e.publishPools()
+					continue
 				}
 				if pool.workers.Load() > scDesired.Load() {
 					return // 并发被调小：跑完当前这张再退出
