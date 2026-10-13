@@ -133,7 +133,8 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="state.running" :list="photos"
-      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" />
+      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" 
+      @rescored="loadAll" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="''"

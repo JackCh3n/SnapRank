@@ -77,10 +77,13 @@
             <span class="tag">{{ h.model || '—' }}</span>
             <span class="pm-h-src" :class="{ cached: h.source === 'cache' }">{{ h.source === 'cache' ? '缓存' : 'API' }}</span>
             <span v-if="viewIdx < 0 && i === 0" class="pm-h-latest">最新</span>
+            <span v-if="supersededIdx.has(i)" class="pm-h-sup" title="该模型的这条已被更新的评分取代（合议只取每模型最新一条）">已更新</span>
             <span class="pm-h-dims" v-if="h.dims">
               技 {{ h.dims.technique.toFixed(1) }} · 构 {{ h.dims.composition.toFixed(1) }} · 内 {{ h.dims.content.toFixed(1) }} · 色 {{ h.dims.color.toFixed(1) }}
             </span>
             <span class="pm-h-time">{{ h.created_at }}</span>
+            <button class="btn plain small pm-h-del" title="删除这条评分记录（删除后自动重算合议平均分）"
+              @click.stop="deleteScore(h, i)">🗑</button>
           </div>
         </div>
 
@@ -148,13 +151,14 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { state, toast, api, markForced, rescorePhotos } from '../store.js'
+import { confirmDialog } from '../confirm.js'
 
 const props = defineProps({
   photo: { type: Object, required: true },
   busy: { type: Boolean, default: false },
   list: { type: Array, default: () => [] }, // 所属批次照片列表（用于上一张/下一张）
 })
-const emit = defineEmits(['close', 'rescore', 'navigate', 'deleted'])
+const emit = defineEmits(['close', 'rescore', 'navigate', 'deleted', 'rescored'])
 
 const p = computed(() => props.photo)
 
@@ -271,6 +275,41 @@ const disp = computed(() => {
 })
 function selectHistory(i) {
   viewIdx.value = viewIdx.value === i ? -1 : i
+}
+
+// 合议「已更新」标记：同一模型存在更新的记录时，旧记录不参与平均（每模型只取最新）
+const supersededIdx = computed(() => {
+  const seen = new Set()
+  const out = new Set()
+  history.value.forEach((h, i) => {
+    const m = h.model || ''
+    if (seen.has(m)) out.add(i) // 列表已按时间倒序：后面出现的同模型记录是旧的
+    else seen.add(m)
+  })
+  return out
+})
+
+// 删除一条评分记录：删除后后端自动重算合议平均分，前端刷新历史与照片数据
+async function deleteScore(h, i) {
+  if (!h.id) { toast('该记录无 ID（旧版本数据），无法删除', true); return }
+  if (!(await confirmDialog({ title: '删除评分记录', message: `删除「${h.model}」在 ${h.created_at} 的这条记录？
+删除后该图的合议平均分会自动重算。`, danger: true, confirmText: '删除' }))) return
+  try {
+    const r = await api('/api/photo/score/delete', { method: 'POST', body: JSON.stringify({ id: h.id }) })
+    toast(`已删除记录${r.avg_score ? `，合议分已重算为 ${r.avg_score.toFixed(1)}` : ''}`)
+    if (viewIdx.value === i) viewIdx.value = -1
+    await loadHistory()
+    // 同步照片本体（分数/状态）并通知父组件刷新列表
+    if (p.value && p.value.id) {
+      try {
+        const np = await api(`/api/photo?id=${p.value.id}`)
+        Object.assign(p.value, np)
+      } catch { /* 照片拉取失败不影响历史刷新 */ }
+    }
+    emit('rescored')
+  } catch (e) {
+    toast(e.message, true)
+  }
 }
 async function loadHistory() {
   if (!p.value || !p.value.id) { history.value = []; viewIdx.value = -1; return }
@@ -602,6 +641,9 @@ async function copyShareCard() {
 .pm-h-score { font-weight: 800; font-size: 15px; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 30px; }
 .pm-h-src { color: var(--text-2); flex: none; }
 .pm-h-src.cached { color: var(--warn); }
+.pm-h-sup { flex: none; font-size: 10px; color: var(--warn); }
+.pm-h-del { flex: none; margin-left: auto; padding: 2px 6px; opacity: 0.55; }
+.pm-h-row:hover .pm-h-del { opacity: 1; }
 .pm-h-latest {
   flex: none; font-size: 10px; font-weight: 700; color: #fff;
   background: var(--accent); border-radius: 4px; padding: 1px 5px;

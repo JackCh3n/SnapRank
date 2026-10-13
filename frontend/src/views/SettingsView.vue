@@ -87,6 +87,13 @@
         </label>
         <label class="field">max_tokens <input type="number" v-model="cfg.score.max_tokens" style="width: 90px" /></label>
         <label class="field">超时（秒）<input type="number" v-model="cfg.score.timeout_sec" style="width: 90px" /></label>
+        <label class="field">
+          多模型评分取值
+          <select v-model="cfg.score.aggregate">
+            <option value="average">平均分（多专家合议，单一模型偏差不影响整体）</option>
+            <option value="primary">主模型分数（首个模型）</option>
+          </select>
+        </label>
         <label class="field">阈值①精选 ≥ <input type="number" step="0.5" v-model="cfg.score.thresholds[0]" style="width: 70px" /></label>
         <label class="field">阈值②良好 ≥ <input type="number" step="0.5" v-model="cfg.score.thresholds[1]" style="width: 70px" /></label>
         <label class="field">阈值③一般 ≥ <input type="number" step="0.5" v-model="cfg.score.thresholds[2]" style="width: 70px" /></label>

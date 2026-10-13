@@ -143,7 +143,8 @@
     <div class="card" v-else><span class="muted">没有照片：先到「运行」页完成一次评分，或调整筛选</span></div>
 
     <PhotoModal v-if="preview" :photo="preview" :busy="false" :list="filtered"
-      @close="preview = null" @navigate="onNavigate" @deleted="onDeleted" />
+      @close="preview = null" @navigate="onNavigate" @deleted="onDeleted" 
+      @rescored="load" />
 
     <!-- 一键重评弹窗：选范围 + 新模型 -->
     <div v-if="rescoreAllOpen" class="cf-mask" @click.self="rescoreAllOpen = false">

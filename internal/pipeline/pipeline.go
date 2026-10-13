@@ -887,6 +887,9 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 				e.store.SetPhotoCompressed(p.ID, cp)
 			}
 			e.store.SetPhotoResult(p.ID, store.StatusScored, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, model, scorer.PromptVersion, "cache", false, 0)
+			if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
+				score = agg // 合议模式：缓存命中的单模型分被平均分覆盖
+			}
 			// 与 scoreOne 的缓存命中路径保持一致：命中也计入多模型评分历史
 			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, "cache")
 			e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
@@ -944,6 +947,44 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		targets = append(targets, scoreTarget{prov: cp, model: cm.Model, label: cm.Preset + "/" + cm.Model})
 	}
 	return e.streamPools(ctx, eng, targets, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+}
+
+// recomputeAggregate 多专家合议：按内容指纹收集全部评分记录，每个模型只取
+// 最新一条（多次评测取最新），用当前权重从维度分重算后取平均，作为该图的正式
+// 分数（单一模型的偏差被其余模型稀释）。同指纹的全部照片（跨批次）一并更新。
+// aggregate=primary 时不动（保持主模型分数）。返回平均分（未启用返回 0）。
+func (e *Engine) RecomputeAggregate(fingerprint string) float64 {
+	cfg := e.cfgFn()
+	if cfg.Score.Aggregate != "average" {
+		return 0
+	}
+	records, err := e.store.PhotoScoresByFingerprint(fingerprint)
+	if err != nil || len(records) == 0 {
+		return 0
+	}
+	w := cfg.WeightsNormalized()
+	// 每模型最新一条（记录已按 created_at DESC, id DESC 排序）
+	latest := map[string]*store.PhotoModelScore{}
+	for _, r := range records {
+		if _, ok := latest[r.Model]; !ok {
+			latest[r.Model] = r
+		}
+	}
+	var sum float64
+	n := 0
+	for _, r := range latest {
+		if r.Dims == nil {
+			continue
+		}
+		sum += scorer.WeightedScore(*r.Dims, w)
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	avg := round1(sum / float64(n))
+	e.store.UpdatePhotoScoresByFingerprint(fingerprint, avg)
+	return avg
 }
 
 // providerForPreset 按预设名构造该平台的 Provider（跨平台对比用）
@@ -1162,6 +1203,10 @@ func (e *Engine) scoreOneMulti(ctx context.Context, targets []scoreTarget, p *st
 			src = "cache"
 		}
 		e.store.SetPhotoResult(p.ID, store.StatusScored, score, primary.dims, primary.tags, primary.strength, primary.weakness, targets[0].label, scorer.PromptVersion, src, primary.clamped, time.Since(start).Milliseconds())
+		// 合议模式：正式分 = 各模型最新评分的平均（覆盖主模型分数）
+		if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
+			score = agg
+		}
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}
 	case store.StatusParseFail:
 		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", targets[0].label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
@@ -1259,6 +1304,10 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model, la
 			e.store.SavePhotoModelScore(p.ID, label, scorer.PromptVersion, score, o.dims, o.tags, o.strength, o.weakness, "cache")
 		}
 		e.store.SetPhotoResult(p.ID, store.StatusScored, score, o.dims, o.tags, o.strength, o.weakness, label, scorer.PromptVersion, src, o.clamped, time.Since(start).Milliseconds())
+		// 合议模式：单模型重评也会更新该图的平均分（其它模型的历史记录参与合议）
+		if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
+			score = agg
+		}
 		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: o.cached}
 	case store.StatusParseFail:
 		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
@@ -1512,7 +1561,37 @@ func (e *Engine) GetSummary(sessionID string) (*Summary, error) {
 // Recalculate 权重变更后基于已存维度分本地重算总分（0 API 成本）；sessionID 为空取最近会话
 func (e *Engine) Recalculate(sessionID string) (int, error) {
 	cfg := e.cfgFn()
-	// 合并视图：跨全部会话本地重算（0 API 成本）
+	// 合议模式：逐照片按指纹重算平均（每模型最新一条 × 当前权重），跨批次同图一致
+	if cfg.Score.Aggregate == "average" {
+		var photos []*store.Photo
+		var err error
+		if sessionID == SessionAll {
+			photos, err = e.store.ScoredPhotosAll()
+		} else {
+			var sess *store.Session
+			sess, err = e.resolveSession(sessionID)
+			if err != nil {
+				return 0, nil
+			}
+			photos, err = e.store.ScoredPhotos(sess.ID)
+		}
+		if err != nil {
+			return 0, err
+		}
+		seen := map[string]bool{}
+		n := 0
+		for _, p := range photos {
+			if seen[p.Fingerprint] {
+				continue // 同指纹只算一次（全部照片一并更新）
+			}
+			seen[p.Fingerprint] = true
+			if e.RecomputeAggregate(p.Fingerprint) > 0 {
+				n++
+			}
+		}
+		return n, nil
+	}
+	// primary 模式：主模型维度分 × 当前权重
 	if sessionID == SessionAll {
 		photos, err := e.store.ScoredPhotosAll()
 		if err != nil {

@@ -47,6 +47,9 @@ type ScoreConfig struct {
 	TimeoutSec      int       `yaml:"timeout_sec" json:"timeout_sec"`
 	Thresholds      []float64 `yaml:"thresholds" json:"thresholds"`     // 分档阈值，降序，默认 [9,7,5]
 	ReuseScores     bool      `yaml:"reuse_scores" json:"reuse_scores"` // 跨会话指纹缓存复用评分（0 计费）
+	// Aggregate 多模型评分取值：average=各模型最新一次评分的平均（多专家合议，
+	// 单一模型偏差不影响整体）；primary=主模型（首个）分数。默认 average
+	Aggregate string `yaml:"aggregate" json:"aggregate"`
 }
 
 // PipelineConfig 流水线参数
@@ -212,6 +215,7 @@ func Default() *Config {
 			TimeoutSec:  120,
 			Thresholds:  []float64{9, 7, 5},
 			ReuseScores: true,
+			Aggregate:   "average",
 		},
 		Pipeline: PipelineConfig{
 			ScoreConcurrency:    1,
@@ -313,6 +317,11 @@ func (c *Config) Normalize() {
 	case "", "low", "medium", "high":
 	default:
 		c.Score.ReasoningEffort = ""
+	}
+	switch c.Score.Aggregate {
+	case "average", "primary":
+	default:
+		c.Score.Aggregate = "average"
 	}
 	// 视觉过滤迁移：旧默认把纯文本的 glm-5/5.1/5.2 误判为视觉，升级为新默认
 	if visionPatternsEqual(c.Model.VisionPatterns, legacyVisionPatterns) {

@@ -713,6 +713,19 @@ func recycleRawSiblings(src, sessionDir string, res *GalleryDeleteResult) int {
 	return n
 }
 
+// DeletePhotoScore 删除一条评分记录（弹窗历史管理），删除后重算该图的合议平均分。
+// 返回重算后的平均分（primary 模式或无剩余记录时返回 0 表示沿用现状）。
+func (c *Core) DeletePhotoScore(scoreID int64) (float64, error) {
+	if c.Engine().IsRunning() {
+		return 0, fmt.Errorf("评分进行中，请等待完成后再删除记录")
+	}
+	fp, err := c.st.DeletePhotoScore(scoreID)
+	if err != nil {
+		return 0, err
+	}
+	return c.Engine().RecomputeAggregate(fp), nil
+}
+
 // ImportDB 合并导入外部数据库文件（另一台电脑导出的 snaprank.db 或备份）。
 // 导入前先自动备份当前库（可回滚）；评分进行中拒绝导入。
 func (c *Core) ImportDB(path string) (*store.ImportResult, error) {

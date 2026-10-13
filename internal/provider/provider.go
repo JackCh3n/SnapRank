@@ -388,6 +388,7 @@ func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (strin
 	}
 	h := fnv.New64a()
 	h.Write([]byte(req.ImageB64[:min(2048, len(req.ImageB64))]))
+	h.Write([]byte(model)) // 模型名入哈希：不同模型给不同分数，便于验证多模型对比与平均
 	x := h.Sum64()
 
 	pick := func(base, spread float64, salt uint64) float64 {

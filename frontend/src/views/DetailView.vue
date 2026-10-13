@@ -94,7 +94,8 @@
 
     <!-- 统一照片详情弹窗 -->
     <PhotoModal v-if="preview" :photo="preview" :busy="running" :list="items"
-      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" />
+      @close="closePreview" @navigate="onNavigate" @deleted="onPhotoDeleted" 
+      @rescored="load" />
 
     <!-- 批次管理弹窗 -->
     <SessionManager v-if="showManager" :sessions="sessions" :current="sessionID"

@@ -537,6 +537,7 @@ func (s *Store) GalleryList() ([]*Photo, error) {
 
 // PhotoModelScore 单条多模型评分历史
 type PhotoModelScore struct {
+	ID            int64    `json:"id"` // 记录 ID（删除单条评分记录用）
 	Model         string   `json:"model"`
 	PromptVersion string   `json:"prompt_version"`
 	Score         float64  `json:"score"`
@@ -562,7 +563,7 @@ func (s *Store) SavePhotoModelScore(photoID int64, model, promptVersion string, 
 func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 	// 按内容指纹聚合：跨批次重新扫描会为同一张图生成新 photo id，
 	// 历史必须按指纹关联才能在弹窗里看到这张图的全部评分记录
-	rows, err := s.db.Query(`SELECT ps.model, ps.prompt_version, ps.score, ps.dims, ps.tags, ps.strength, ps.weakness, ps.source, ps.created_at
+	rows, err := s.db.Query(`SELECT ps.id, ps.model, ps.prompt_version, ps.score, ps.dims, ps.tags, ps.strength, ps.weakness, ps.source, ps.created_at
 		FROM photo_scores ps
 		WHERE ps.photo_id IN (SELECT id FROM photos WHERE fingerprint = (SELECT fingerprint FROM photos WHERE id = ?))
 		ORDER BY ps.created_at DESC`, photoID)
@@ -574,7 +575,7 @@ func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 	for rows.Next() {
 		var m PhotoModelScore
 		var dimsJSON, tagsJSON sql.NullString
-		if err := rows.Scan(&m.Model, &m.PromptVersion, &m.Score, &dimsJSON, &tagsJSON, &m.Strength, &m.Weakness, &m.Source, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Model, &m.PromptVersion, &m.Score, &dimsJSON, &tagsJSON, &m.Strength, &m.Weakness, &m.Source, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if dimsJSON.Valid && dimsJSON.String != "" {
@@ -589,6 +590,63 @@ func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 		list = append(list, &m)
 	}
 	return list, rows.Err()
+}
+
+// PhotoScoresByFingerprint 按内容指纹查全部评分记录（合议平均计算用）
+func (s *Store) PhotoScoresByFingerprint(fingerprint string) ([]*PhotoModelScore, error) {
+	rows, err := s.db.Query(`SELECT ps.id, ps.model, ps.prompt_version, ps.score, ps.dims, ps.tags, ps.strength, ps.weakness, ps.source, ps.created_at
+		FROM photo_scores ps JOIN photos p ON p.id = ps.photo_id
+		WHERE p.fingerprint = ?
+		ORDER BY ps.created_at DESC, ps.id DESC`, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := make([]*PhotoModelScore, 0, 8)
+	for rows.Next() {
+		var m PhotoModelScore
+		var dimsJSON, tagsJSON sql.NullString
+		if err := rows.Scan(&m.ID, &m.Model, &m.PromptVersion, &m.Score, &dimsJSON, &tagsJSON, &m.Strength, &m.Weakness, &m.Source, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		if dimsJSON.Valid && dimsJSON.String != "" {
+			var d Dims
+			if json.Unmarshal([]byte(dimsJSON.String), &d) == nil {
+				m.Dims = &d
+			}
+		}
+		if tagsJSON.Valid && tagsJSON.String != "" {
+			json.Unmarshal([]byte(tagsJSON.String), &m.Tags)
+		}
+		list = append(list, &m)
+	}
+	return list, rows.Err()
+}
+
+// DeletePhotoScore 删除一条评分记录，返回受影响照片的内容指纹（供重算合议分）
+func (s *Store) DeletePhotoScore(id int64) (string, error) {
+	var fp string
+	err := s.db.QueryRow(`SELECT p.fingerprint FROM photo_scores ps JOIN photos p ON p.id = ps.photo_id WHERE ps.id=?`, id).Scan(&fp)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	if _, err := s.db.Exec(`DELETE FROM photo_scores WHERE id=?`, id); err != nil {
+		return "", err
+	}
+	return fp, nil
+}
+
+// UpdatePhotoScoresByFingerprint 按指纹更新全部照片的合议分（同一张图跨批次分数一致）
+func (s *Store) UpdatePhotoScoresByFingerprint(fingerprint string, score float64) (int64, error) {
+	res, err := s.db.Exec(`UPDATE photos SET score=?, updated_at=? WHERE fingerprint=?`, score, now(), fingerprint)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ImportDir Get/Set 持久化导入目录（跨重启共用一个粘贴批次）
