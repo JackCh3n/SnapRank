@@ -100,7 +100,7 @@
             <option v-for="m in state.models.vision.filter(x => x !== state.selModel)" :key="m" :value="m">{{ m }}</option>
           </select>
         </label>
-        <div class="field" style="min-width: 320px">
+        <div class="field" style="min-width: 360px">
           跨平台模型（其它平台的预设 + 模型，并行评同一张）
           <div class="row" style="gap: 6px">
             <select v-model="crossPreset" style="flex: 1" @change="loadPresetModels" title="平台预设（设置页可添加）">
@@ -111,7 +111,12 @@
               <option value="">{{ crossPresetLoading ? "拉取中…" : "选择模型…" }}</option>
               <option v-for="m in crossPresetModels" :key="m" :value="m">{{ m }}</option>
             </select>
-            <button class="btn plain small" :disabled="!crossPreset || !crossModel" @click="addCrossModel">＋ 添加</button>
+            <button class="btn plain small" :disabled="!crossPreset || !(crossModel || crossManual.trim())" @click="addCrossModel">＋ 添加</button>
+          </div>
+          <div class="row" style="gap: 6px; margin-top: 4px">
+            <input v-model="crossManual" style="flex: 1" placeholder="或手动输入模型 ID（部分平台无模型清单接口，如天翼）"
+              @keyup.enter="addCrossModel" />
+            <span v-if="crossNoList" class="muted" style="flex: none">该平台无清单接口，直接输入模型 ID</span>
           </div>
           <div v-if="state.compareCross.length" class="row" style="flex-wrap: wrap; gap: 6px; margin-top: 6px">
             <span v-for="(c, i) in state.compareCross" :key="c.preset + '/' + c.model" class="tag"
@@ -435,6 +440,8 @@ const nightMode = ref(localStorage.getItem('sr_night_mode') === '1')
 const compareMode = ref(false) // 多模型对比：主模型 + compareModels（同平台）+ compareCross（跨平台）并行评同一张
 const crossPreset = ref('')
 const crossModel = ref('')
+const crossManual = ref('')
+const crossNoList = ref(false) // 平台无 /models 清单接口（如天翼）→ 提示手动输入
 const crossPresetModels = ref([])
 const crossPresetLoading = ref(false)
 const presets = computed(() => (state.config && state.config.presets) || [])
@@ -442,22 +449,30 @@ const presets = computed(() => (state.config && state.config.presets) || [])
 async function loadPresetModels() {
   crossModel.value = ''
   crossPresetModels.value = []
+  crossNoList.value = false
   if (!crossPreset.value) return
   crossPresetLoading.value = true
   try {
     const r = await api('/api/preset/models', { method: 'POST', body: JSON.stringify({ name: crossPreset.value }) })
     crossPresetModels.value = r.vision || []
-    if (!crossPresetModels.value.length) toast('该平台未发现视觉模型（可在设置调整识别规则）', true)
+    if (!crossPresetModels.value.length) {
+      crossNoList.value = true
+      toast('该平台未返回可用模型清单，可直接在下方输入模型 ID')
+    }
   } catch (e) {
-    toast(e.message, true)
+    // 清单接口不存在/不可达：不阻塞——手动输入模型 ID 即可
+    crossNoList.value = true
+    toast('该平台无模型清单接口（或拉取失败），可直接输入模型 ID 添加')
   }
   crossPresetLoading.value = false
 }
 function addCrossModel() {
-  if (!crossPreset.value || !crossModel.value) return
-  const exists = state.compareCross.some((c) => c.preset === crossPreset.value && c.model === crossModel.value)
-  if (!exists) state.compareCross.push({ preset: crossPreset.value, model: crossModel.value })
+  const model = crossManual.value.trim() || crossModel.value
+  if (!crossPreset.value || !model) return
+  const exists = state.compareCross.some((c) => c.preset === crossPreset.value && c.model === model)
+  if (!exists) state.compareCross.push({ preset: crossPreset.value, model })
   crossModel.value = ''
+  crossManual.value = ''
 }
 function removeCrossModel(i) {
   state.compareCross.splice(i, 1)

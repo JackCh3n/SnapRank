@@ -216,12 +216,13 @@ func init() {
 	anthropicHTTPClient.Transport = &http.Transport{}
 }
 
-// setAuth 按平台设置认证头：火山只认 Bearer，官方认 x-api-key
+// setAuth 按平台设置认证头：官方 Anthropic API（api.anthropic.com）认 x-api-key，
+// 兼容网关（火山/天翼 eaichat 等）一律 Bearer——网关普遍按 OpenAI 惯例收 Bearer
 func (a *AnthropicProvider) setAuth(req *http.Request) {
-	if a.isVolcano() {
-		req.Header.Set("Authorization", "Bearer "+a.cfg.Provider.APIKey)
-	} else {
+	if strings.Contains(a.cfg.Provider.BaseURL, "api.anthropic.com") {
 		req.Header.Set("x-api-key", a.cfg.Provider.APIKey)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+a.cfg.Provider.APIKey)
 	}
 }
 
