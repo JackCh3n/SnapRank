@@ -20,7 +20,7 @@
           </select>
         </label>
         <button class="btn plain" :disabled="scanning" @click="doScan">
-          {{ scanning ? '扫描中…（计算指纹）' : '扫描' }}
+          {{ scanning ? `扫描中…（已扫 ${state.scanScanned || 0} 个文件）` : '扫描' }}
         </button>
       </div>
       <div v-if="formatPreset && state.scan" class="muted" style="margin-top: 4px">
@@ -180,6 +180,8 @@
       <div class="progress-track"><div class="progress-fill" :style="{ width: pct + '%' }"></div></div>
       <div class="muted" style="margin: 6px 0 10px">
         <span v-if="elapsedText">已用时 {{ elapsedText }}</span>
+        <span v-if="scanText" style="margin-left: 8px">· 🔍 {{ scanText }}</span>
+        <span v-if="scanText" class="muted">（边扫边评，不用等扫完）</span>
       </div>
 
       <!-- 模型池：压缩池 + 每个模型独立池（进度/速度/暂停/停止/运行中追加模型） -->
@@ -543,6 +545,12 @@ const elapsedText = computed(() => {
   if (!t || !t.startedAt || !state.running) return ''
   return fmtDur(Math.round((Date.now() - t.startedAt) / 1000))
 })
+// 后台扫描进度（创建任务只等首批，其余边扫边并入队列）
+const scanText = computed(() => {
+  const t = cur.value
+  if (!t || t.scanDone || !t.scanTotal) return ''
+  return `后台扫描中：已扫 ${t.scanScanned || 0}/${t.scanTotal} 个文件`
+})
 
 // 时长人性化：秒 → 分秒 → 小时分 → 天小时 → 年天
 function fmtDur(sec) {
@@ -653,6 +661,7 @@ async function doScan() {
   const dirs = parseDirs()
   if (!dirs.length) return toast('请先输入目录', true)
   scanning.value = true
+  state.scanScanned = 0 // 重置预扫描进度（后端 SSE 逐步推进）
   try {
     // 多目录逐个扫描后聚合展示
     let count = 0, live = 0, est = 0

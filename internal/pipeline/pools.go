@@ -24,22 +24,35 @@ const poolConsecFailLimit = 10
 type workQueue struct {
 	mu        sync.Mutex
 	items     []*store.Photo
+	ids       map[int64]bool // 已入队照片 ID：重复提交同一目录时不重复入队
 	head      int
 	done      bool
 	appending int // 正在扫描/登记新目录并入：此期间队列暂空也不算收尾
 }
 
 func newWorkQueue(ps []*store.Photo) *workQueue {
-	return &workQueue{items: append([]*store.Photo(nil), ps...)}
+	q := &workQueue{ids: map[int64]bool{}}
+	q.push(ps...)
+	return q
 }
 
-func (q *workQueue) push(ps ...*store.Photo) {
+// push 入队（按照片 ID 去重），返回实际入队数量
+func (q *workQueue) push(ps ...*store.Photo) int {
 	if len(ps) == 0 {
-		return
+		return 0
 	}
+	added := 0
 	q.mu.Lock()
-	q.items = append(q.items, ps...)
+	for _, p := range ps {
+		if q.ids[p.ID] {
+			continue
+		}
+		q.ids[p.ID] = true
+		q.items = append(q.items, p)
+		added++
+	}
 	q.mu.Unlock()
+	return added
 }
 
 // beginAppend / endAppend 标记「正在并入新目录」：期间即使队列为空也不判收尾
@@ -248,11 +261,16 @@ func (e *Engine) AddPhotosToRunning(photos []*store.Photo) error {
 		rp.mu.Unlock()
 		return fmt.Errorf("任务正在收尾，无法并入新目录")
 	}
-	rp.planned += int64(len(photos))
 	rp.mu.Unlock()
-	rp.work.push(photos...)
-	rp.compress.total.Add(int64(len(photos)))
-	logutil.Info("并入当前批次 %d 张（模型池接着评，压缩缓存复用）", len(photos))
+	added := rp.work.push(photos...)
+	if added == 0 {
+		return nil // 都已在队列里（重复提交同一目录）
+	}
+	rp.mu.Lock()
+	rp.planned += int64(added)
+	rp.mu.Unlock()
+	rp.compress.total.Add(int64(added))
+	logutil.Info("并入当前批次 %d 张（模型池接着评，压缩缓存复用）", added)
 	e.publishPools()
 	return nil
 }

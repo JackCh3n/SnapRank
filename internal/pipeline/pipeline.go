@@ -165,6 +165,10 @@ type Engine struct {
 	sessionID string
 	paused    atomic.Bool // 暂停标记：跑完当前这张后挂起，恢复后继续（内存态，随任务结束清除）
 	pools     atomic.Pointer[runPools] // 运行中任务的模型池集合（供单池暂停/停止/追加模型）
+	listMu    sync.Mutex
+	listReady bool   // 当前运行任务的照片清单已加载：此后新登记的必须追加进队列（防漏）
+	scanMu    sync.Mutex
+	scanning  map[string]bool // 仍在后台扫描的会话（批次收尾要等它扫完）
 	mu        sync.Mutex
 	queued    []queuedTask // 排队任务（当前任务结束后顺序执行）
 }
@@ -218,6 +222,7 @@ func (e *Engine) Scan(dir string, formats []string) ([]*ScanItem, float64, error
 	}
 	var items []*ScanItem
 	seen := map[string]bool{}
+	scanned := 0
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // 不可读的子树跳过
@@ -256,6 +261,11 @@ func (e *Engine) Scan(dir string, formats []string) ([]*ScanItem, float64, error
 		dup := seen[f]
 		seen[f] = true
 		items = append(items, &ScanItem{Path: path, Filename: info.Name(), Size: info.Size(), FP: f, Dup: dup})
+		// 指纹较慢（大图要整份读）：每 25 个推一次进度，前端显示「扫描中…已扫 N 个文件」
+		scanned++
+		if scanned%25 == 0 {
+			e.Bus.Publish(Event{Type: "scan", Data: ScanProgress{Scanned: int64(scanned)}})
+		}
 		return nil
 	})
 	if err != nil {
@@ -365,21 +375,31 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 	if len(dirs) == 0 {
 		return nil, errors.New("未指定目录")
 	}
-	// 逐目录扫描并合并清单（跨目录按内容指纹去重）
-	var entries []scanEntry
-	seenFP := map[string]bool{}
 	for _, d := range dirs {
-		its, _, err := e.Scan(d, opts.Formats)
-		if err != nil {
-			return nil, err
+		if st, err := os.Stat(d); err != nil || !st.IsDir() {
+			return nil, fmt.Errorf("目录不存在或不可读: %s", d)
 		}
-		for _, it := range its {
-			if seenFP[it.FP] {
-				continue
-			}
-			seenFP[it.FP] = true
-			entries = append(entries, scanEntry{it: it, base: d})
+	}
+	// 先列出候选文件（不做指纹，很快），首批指纹够 initialScanBatch 张就让任务开跑；
+	// 其余在后台继续指纹并追加进队列（8867 张也不卡「创建任务」）
+	files := e.listCandidates(dirs, opts.Formats)
+	if len(files) == 0 {
+		return nil, errors.New("目录中没有可处理的图片")
+	}
+	seenFP := map[string]bool{}
+	var seenMu sync.Mutex
+	var entries []scanEntry
+	idx := 0
+	for idx < len(files) && len(entries) == 0 {
+		end := idx + initialScanBatch
+		if end > len(files) {
+			end = len(files)
 		}
+		entries = append(entries, fingerprintFiles(files[idx:end], seenFP, &seenMu)...)
+		idx = end
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("目录中没有可处理的图片")
 	}
 	live := 0
 	for _, en := range entries {
@@ -435,6 +455,7 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 		_ = e.store.RefreshSessionCounts(sessID)
 		e.store.SetSessionDirs(sessID, e.sessionDirsJoined(sessID, dirs))
 		logutil.Info("并入当前批次 %s：%d 个目录 %d 张待评分", sessID, len(dirs), len(pend))
+		e.startBackgroundScan(sessID, files[idx:], seenFP, &seenMu, len(files), idx)
 		return &StartResult{SessionID: sessID, Resumed: true, Merged: true, Pending: len(pend), Model: model}, nil
 	}
 
@@ -489,6 +510,8 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 		}
 	}
 	e.enqueue(sessID, opts, model)
+	// 剩余文件后台继续扫描并追加进队列（任务已在跑，扫描不再阻塞创建）
+	e.startBackgroundScan(sessID, files[idx:], seenFP, &seenMu, len(files), idx)
 	return &StartResult{SessionID: sessID, Resumed: resumed, Pending: pending, Model: model}, nil
 }
 
@@ -496,6 +519,122 @@ func (e *Engine) Start(opts StartOpts) (*StartResult, error) {
 type scanEntry struct {
 	it   *ScanItem
 	base string
+}
+
+// ScanProgress 后台扫描进度（SSE 推给前端：已扫描 N / 总数 M）
+type ScanProgress struct {
+	SessionID string `json:"session_id"`
+	Scanned   int64  `json:"scanned"`
+	Total     int64  `json:"total"`
+	Done      bool   `json:"done,omitempty"`
+}
+
+// initialScanBatch 首批指纹张数：先扫这么多就让任务开跑，其余后台继续扫并追加进队列
+const initialScanBatch = 50
+
+// scanChunk 后台扫描每登记这么多张就追加进运行中批次并推进度
+const scanChunk = 40
+
+// beginScan / endScan / isScanning 后台扫描登记：批次收尾要等扫描结束（新照片要并入队列）
+func (e *Engine) beginScan(sessID string) {
+	e.scanMu.Lock()
+	if e.scanning == nil {
+		e.scanning = map[string]bool{}
+	}
+	e.scanning[sessID] = true
+	e.scanMu.Unlock()
+}
+
+func (e *Engine) endScan(sessID string) {
+	e.scanMu.Lock()
+	delete(e.scanning, sessID)
+	e.scanMu.Unlock()
+}
+
+func (e *Engine) isScanning(sessID string) bool {
+	e.scanMu.Lock()
+	defer e.scanMu.Unlock()
+	return e.scanning[sessID]
+}
+
+// candFile 候选文件：路径 + 所属根目录（登记时算相对路径用）
+type candFile struct {
+	path string
+	base string
+}
+
+// listCandidates 收集目录下符合过滤条件的文件（不做指纹哈希，很快）。
+// 过滤口径与 Scan 保持一致：扩展名/白名单/最小体积/跳过隐藏与回收站目录
+func (e *Engine) listCandidates(dirs, formats []string) []candFile {
+	cfg := e.cfgFn()
+	whitelist := map[string]bool{}
+	for _, f := range formats {
+		f = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(f), "."))
+		if f != "" {
+			whitelist[f] = true
+		}
+	}
+	var out []candFile
+	seenPath := map[string]bool{}
+	for _, dir := range dirs {
+		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				name := info.Name()
+				if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "$") || name == RecycleDirName {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			ext := strings.ToLower(filepath.Ext(info.Name()))
+			supported := compress.SupportedExts[ext]
+			unsupported := compress.UnsupportedExts[ext]
+			if !supported && !unsupported {
+				return nil
+			}
+			if len(whitelist) > 0 && !whitelist[strings.TrimPrefix(ext, ".")] {
+				return nil
+			}
+			if strings.HasPrefix(info.Name(), "~$") || strings.HasSuffix(info.Name(), ".tmp") {
+				return nil
+			}
+			if info.Size() < int64(cfg.Pipeline.MinFileSizeKB)*1024 {
+				return nil
+			}
+			if !seenPath[path] {
+				seenPath[path] = true
+				out = append(out, candFile{path: path, base: dir})
+			}
+			return nil
+		})
+	}
+	return out
+}
+
+// fingerprintFiles 指纹 + 跨目录去重（后台扫描与首批共用一个 seen 表）
+func fingerprintFiles(files []candFile, seen map[string]bool, mu *sync.Mutex) []scanEntry {
+	var out []scanEntry
+	for _, f := range files {
+		fpv, err := fp.OfFile(f.path)
+		if err != nil {
+			continue
+		}
+		mu.Lock()
+		dup := seen[fpv]
+		seen[fpv] = true
+		mu.Unlock()
+		if dup {
+			continue
+		}
+		size := int64(0)
+		if st, err := os.Stat(f.path); err == nil {
+			size = st.Size()
+		}
+		out = append(out, scanEntry{it: &ScanItem{Path: f.path, Filename: filepath.Base(f.path), Size: size, FP: fpv}, base: f.base})
+	}
+	return out
 }
 
 // effectiveDirs 目录集合：Dirs 优先；否则把 Dir 按 ; / ；/ 换行拆开（去重保序）
@@ -519,8 +658,9 @@ func effectiveDirs(opts StartOpts) []string {
 	return out
 }
 
-// registerPhotos 把扫描清单登记进会话（内容已变更的重置为待处理）
-func (e *Engine) registerPhotos(sessID string, entries []scanEntry) {
+// registerEntries 登记扫描项并返回新登记的待评分照片（含数据库 ID，供追加进队列）
+func (e *Engine) registerEntries(sessID string, entries []scanEntry) []*store.Photo {
+	var out []*store.Photo
 	for _, en := range entries {
 		status := store.StatusPending
 		if en.it.Dup {
@@ -528,14 +668,104 @@ func (e *Engine) registerPhotos(sessID string, entries []scanEntry) {
 		} else if compress.UnsupportedExts[strings.ToLower(filepath.Ext(en.it.Path))] {
 			status = store.StatusUnsupported // HEIC/RAW：登记但不支持
 		}
-		id, err := e.store.UpsertPhoto(&store.Photo{
+		p := &store.Photo{
 			SessionID: sessID, Fingerprint: en.it.FP, SrcPath: en.it.Path,
 			Filename: en.it.Filename, RelPath: relPath(en.base, en.it.Path), Size: en.it.Size, Status: status,
-		})
-		if err == nil && status == store.StatusPending {
+		}
+		id, err := e.store.UpsertPhoto(p)
+		if err != nil {
+			continue
+		}
+		p.ID = id
+		if status == store.StatusPending {
 			e.resetIfChanged(id, en.it.FP)
+			out = append(out, p)
 		}
 	}
+	return out
+}
+
+// registerPhotos 把扫描清单登记进会话（内容已变更的重置为待处理）
+func (e *Engine) registerPhotos(sessID string, entries []scanEntry) {
+	e.registerEntries(sessID, entries)
+}
+
+// startBackgroundScan 后台继续指纹剩余文件：分批登记进会话，能追加就追加进运行中
+// 批次（模型池接着评）；每次追加推进度事件（前端显示「扫描 N/M」）。
+func (e *Engine) startBackgroundScan(sessID string, rest []candFile, seen map[string]bool, mu *sync.Mutex, total, already int) {
+	if len(rest) == 0 {
+		return
+	}
+	e.beginScan(sessID)
+	go func() {
+		defer e.endScan(sessID)
+		scanned := int64(already)
+		var buf []scanEntry
+		flush := func() {
+			if len(buf) == 0 {
+				return
+			}
+			photos := e.registerEntries(sessID, buf)
+			buf = buf[:0]
+			e.listMu.Lock()
+			mustAppend := e.listReady
+			e.listMu.Unlock()
+			if mustAppend {
+				e.appendToRunning(sessID, photos)
+			}
+			e.Bus.Publish(Event{Type: "scan", Data: ScanProgress{SessionID: sessID, Scanned: scanned, Total: int64(total)}})
+		}
+		for i := 0; i < len(rest); i += scanChunk {
+			end := i + scanChunk
+			if end > len(rest) {
+				end = len(rest)
+			}
+			buf = append(buf, fingerprintFiles(rest[i:end], seen, mu)...)
+			scanned += int64(end - i)
+			flush()
+			if e.scanCostExceeded(sessID) {
+				e.Bus.Publish(Event{Type: "error", Data: map[string]string{
+					"error": "预估费用已达单批次上限，已停止继续扫描剩余文件（已登记的照片会照常评完）"}})
+				break
+			}
+		}
+		flush()
+		e.Bus.Publish(Event{Type: "scan", Data: ScanProgress{SessionID: sessID, Scanned: int64(total), Total: int64(total), Done: true}})
+	}()
+}
+
+// appendToRunning 把照片追加进运行中的批次（会话不符则只保留登记，等下次续跑）
+func (e *Engine) appendToRunning(sessID string, photos []*store.Photo) {
+	if len(photos) == 0 {
+		return
+	}
+	if e.CurrentSession() != sessID {
+		return
+	}
+	if err := e.AddPhotosToRunning(photos); err != nil {
+		logutil.Info("后台扫描追加未成功（照片已登记，下次开始时续跑）：%v", err)
+	}
+}
+
+// scanCostExceeded 累计预估是否已超单批次费用上限（后台扫描持续复核）
+func (e *Engine) scanCostExceeded(sessID string) bool {
+	cfg := e.cfgFn()
+	if cfg.Cost.BatchLimit <= 0 {
+		return false
+	}
+	s, err := e.store.GetSession(sessID)
+	if err != nil || s == nil {
+		return false
+	}
+	per := e.estCost(s.Model)
+	if per <= 0 {
+		return false
+	}
+	cnt, err := e.store.CountPhotos(sessID)
+	if err != nil {
+		return false
+	}
+	return per*float64(cnt) > cfg.Cost.BatchLimit
 }
 
 // mergeSessionsInto 把与这些目录相关的未完成批次并入目标批次（目录合并为一个队列）
@@ -983,6 +1213,9 @@ func (e *Engine) startAsync(sessID string, opts StartOpts, model string) {
 		}
 		e.Bus.Publish(Event{Type: "done", Data: DonePayload{SessionID: sessID, Stopped: stopped, Failed: failed, Night: opts.Night}})
 		e.Bus.Publish(Event{Type: "pools", Data: []PoolState{}}) // 清空池面板（任务已结束）
+		e.listMu.Lock()
+		e.listReady = false // 本任务结束：新扫描的照片留给下次续跑
+		e.listMu.Unlock()
 		// 先复位运行态再拉起排队任务：popAndRun 依赖 running=false 才会取任务，
 		// 不能依赖 defer 的复位时机（那要等本 goroutine 返回，队列会永远卡住）
 		e.paused.Store(false) // 暂停标记不跨任务
@@ -1008,11 +1241,22 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		return false
 	}
 
+	// 运行中的池集合提前建立（在照片清单加载之前）：后台扫描新登记的照片能立即
+	// 追加进投料队列（workQueue 按 ID 去重，与稍后加载的清单不会重复），
+	// 否则「加载完成 → 池建立」之间会有一个追加失手的窗口
+	rp := &runPools{ready: newReadyList(), work: newWorkQueue(nil)}
+	e.pools.Store(rp)
+	defer e.pools.Store(nil)
+
 	photos, _, err := e.store.ListPhotos(sessID, "", 0, 1<<20, "", "", "", "", -1, -1)
 	if err != nil {
 		logutil.Error("读取清单失败: %v", err)
 		return false
 	}
+	// 标记清单已加载：此后后台扫描新登记的照片必须走「追加进队列」而不是等下次加载
+	e.listMu.Lock()
+	e.listReady = true
+	e.listMu.Unlock()
 	// 待处理队列：非重复且未完成；抽样限额
 	var queue []*store.Photo
 	for _, p := range photos {
@@ -1105,7 +1349,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 		}
 		targets = append(targets, scoreTarget{prov: cp, model: cm.Model, label: cm.Preset + "/" + cm.Model})
 	}
-	return e.streamPools(ctx, eng, targets, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
+	return e.streamPools(ctx, rp, eng, targets, compressQueue, cacheDir, sessID, totalAll, publishScoreStage)
 }
 
 // recomputeAggregate 多专家合议：按内容指纹收集全部评分记录，每个模型只取
@@ -1171,11 +1415,11 @@ func (e *Engine) providerForPreset(name string) (provider.Provider, error) {
 // 暂停语义：整任务暂停在投料口与各池取数前挂起；单池暂停只挂起该池。
 // 停止语义：ctx 取消后各环节退出，未评分照片留在原状态供续跑。
 // 返回是否被停止。
-func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets []scoreTarget,
+func (e *Engine) streamPools(ctx context.Context, rp *runPools, eng *compress.Engine, targets []scoreTarget,
 	compressQueue []*store.Photo, cacheDir, sessID string, totalAll int, publishScoreStage func()) bool {
 
-	ready := newReadyList()
-	work := newWorkQueue(compressQueue) // 压缩投料队列：运行中可并入新目录的照片
+	ready := rp.ready
+	work := rp.work // 压缩投料队列（run 阶段已建立：后台扫描的照片可能已在里面）
 	scDesired := atomic.Int64{}
 	ccDesired := atomic.Int64{}
 	compressJobs := make(chan *store.Photo) // 无缓冲：投料节奏跟随压缩 worker，动态扩容窗口覆盖整个压缩阶段
@@ -1188,10 +1432,13 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	var poolMu sync.Mutex // 保护 compressClosed / 压缩池扩容
 	doneCount := atomic.Int64{}
 
-	rp := &runPools{ready: ready, work: work, planned: int64(len(compressQueue))}
-	rp.compress.total.Store(int64(len(compressQueue)))
-	e.pools.Store(rp)
-	defer e.pools.Store(nil)
+	// 本批次的照片入队（按 ID 去重：与 run 阶段后台扫描提前追加的不重复）
+	if added := work.push(compressQueue...); added > 0 {
+		rp.mu.Lock()
+		rp.planned += int64(added)
+		rp.mu.Unlock()
+		rp.compress.total.Add(int64(added))
+	}
 
 	// 照片完成度：required = 投递时活跃的池标签（后加的池不阻塞已投递照片定稿）
 	type photoState struct {
@@ -1522,6 +1769,9 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 	drained := func() bool {
 		if ctx.Err() != nil {
 			return true
+		}
+		if e.isScanning(sessID) {
+			return false // 后台还在扫描：等它把剩余照片并进来
 		}
 		if !work.empty() || compressInflight.Load() > 0 {
 			return false

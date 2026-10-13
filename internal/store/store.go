@@ -533,6 +533,13 @@ func (s *Store) UpsertPhoto(p *Photo) (int64, error) {
 	return id, err
 }
 
+// CountPhotos 会话照片总数（后台扫描复核成本上限用）
+func (s *Store) CountPhotos(sessionID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM photos WHERE session_id=?`, sessionID).Scan(&n)
+	return n, err
+}
+
 // SetPhotoCompressed 标记压缩完成
 func (s *Store) SetPhotoCompressed(id int64, compressedPath string) error {
 	_, err := s.db.Exec(`UPDATE photos SET status=?, compressed_path=?, updated_at=? WHERE id=?`,

@@ -30,6 +30,7 @@ export const state = reactive({
   tally: { done: 0, fail: 0, other: 0 }, // 本页面会话累计：已评完 / 失败 / 无法处理（不支持/损坏/重复）
   lastDone: null,              // 最近一次完成事件 {stopped, session}：停止后剩余张数展示用
   toast: null,
+  scanScanned: 0,             // 预扫描（无会话的预览扫描）已扫文件数
 })
 
 const FINAL = new Set(['scored', 'parse_fail', 'failed', 'bad_image', 'unsupported'])
@@ -172,6 +173,20 @@ export function connectSSE() {
   // 池状态（压缩池 + 各模型池）：每秒推送 + 单池控制/追加模型后即时推送
   es.addEventListener('pools', (e) => {
     state.pools = JSON.parse(e.data) || []
+  })
+  // 后台扫描进度：创建任务只等首批，其余边扫边并入队列（总数随之增长）
+  es.addEventListener('scan', (e) => {
+    const d = JSON.parse(e.data)
+    if (!d.session_id) {
+      state.scanScanned = d.scanned // 预扫描按钮的进度（无会话：纯预览扫描）
+      return
+    }
+    const t = taskOf(d.session_id)
+    if (!t) return
+    t.scanScanned = d.scanned
+    t.scanTotal = d.total
+    if (d.total && d.total > (t.total || 0)) t.total = d.total
+    if (d.done) t.scanDone = true
   })
   es.addEventListener('stage', (e) => {
     const d = JSON.parse(e.data)
