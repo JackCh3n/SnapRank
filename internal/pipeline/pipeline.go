@@ -47,6 +47,7 @@ type Event struct {
 // Progress 单张完成进度
 type Progress struct {
 	SessionID string  `json:"session_id"`
+	PhotoID   int64   `json:"photo_id,omitempty"` // 照片记录 ID（前端点击最近评完条目弹窗查看用）
 	Index     int     `json:"index"`
 	Total     int     `json:"total"`
 	File      string  `json:"file"`
@@ -892,7 +893,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 			}
 			// 与 scoreOne 的缓存命中路径保持一致：命中也计入多模型评分历史
 			e.store.SavePhotoModelScore(p.ID, model, scorer.PromptVersion, score, &ent.Dims, ent.Tags, ent.Strength, ent.Weakness, "cache")
-			e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
+			e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Score: score, Status: store.StatusScored, Cached: true}})
 				cacheHits++
 				continue
 			}
@@ -912,7 +913,7 @@ func (e *Engine) run(ctx context.Context, sessID string, opts StartOpts, model s
 	for _, p := range queue {
 		if compress.UnsupportedExts[strings.ToLower(filepath.Ext(p.SrcPath))] {
 			e.store.SetPhotoStatus(p.ID, store.StatusUnsupported, "不支持的格式（RAW/HEIC），已跳过")
-			e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusUnsupported, Error: "不支持的格式（RAW/HEIC），已跳过"}})
+			e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Status: store.StatusUnsupported, Error: "不支持的格式（RAW/HEIC），已跳过"}})
 			continue
 		}
 		compressQueue = append(compressQueue, p)
@@ -1061,11 +1062,11 @@ func (e *Engine) streamPools(ctx context.Context, eng *compress.Engine, targets 
 				if err != nil {
 					logutil.Info("压缩失败 %s: %v", p.Filename, err)
 					e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(err.Error(), 300))
-					e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}})
+					e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Status: store.StatusBadImage, Error: truncate(err.Error(), 120)}})
 					continue
 				}
 				e.store.SetPhotoCompressed(p.ID, cp)
-				e.Bus.Publish(Event{Type: "progress", Data: Progress{SessionID: sessID, File: p.Filename, Status: store.StatusCompressed}})
+				e.Bus.Publish(Event{Type: "progress", Data: Progress{PhotoID: p.ID, SessionID: sessID, File: p.Filename, Status: store.StatusCompressed}})
 				publishScoreStage()
 				select {
 				case scoreJobs <- p:
@@ -1207,17 +1208,17 @@ func (e *Engine) scoreOneMulti(ctx context.Context, targets []scoreTarget, p *st
 		if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
 			score = agg
 		}
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: primary.cached}
 	case store.StatusParseFail:
 		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", targets[0].label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
 		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(primary.errDetail, 500))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(primary.errDetail, 200)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(primary.errDetail, 200)}
 	case store.StatusBadImage:
 		e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(primary.errDetail, 300))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(primary.errDetail, 120)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(primary.errDetail, 120)}
 	default: // failed
 		e.store.SetPhotoStatus(p.ID, store.StatusFailed, truncate(primary.errDetail, 300))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(primary.errDetail, 120)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(primary.errDetail, 120)}
 	}
 }
 
@@ -1308,17 +1309,17 @@ func (e *Engine) scoreOne(ctx context.Context, prov provider.Provider, model, la
 		if agg := e.RecomputeAggregate(p.Fingerprint); agg > 0 {
 			score = agg
 		}
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: o.cached}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Score: score, Status: store.StatusScored, Cached: o.cached}
 	case store.StatusParseFail:
 		e.store.SetPhotoResult(p.ID, store.StatusParseFail, 0, nil, nil, "", "", label, scorer.PromptVersion, "api", false, time.Since(start).Milliseconds())
 		e.store.SetPhotoStatus(p.ID, store.StatusParseFail, truncate(o.errDetail, 500))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(o.errDetail, 200)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusParseFail, Error: truncate(o.errDetail, 200)}
 	case store.StatusBadImage:
 		e.store.SetPhotoStatus(p.ID, store.StatusBadImage, truncate(o.errDetail, 300))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(o.errDetail, 120)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusBadImage, Error: truncate(o.errDetail, 120)}
 	default: // failed
 		e.store.SetPhotoStatus(p.ID, store.StatusFailed, truncate(o.errDetail, 300))
-		return Progress{SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(o.errDetail, 120)}
+		return Progress{PhotoID: p.ID, SessionID: p.SessionID, Index: int(idx), Total: total, File: p.Filename, Status: store.StatusFailed, Error: truncate(o.errDetail, 120)}
 	}
 }
 

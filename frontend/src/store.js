@@ -190,7 +190,7 @@ export function connectSSE() {
     if (d.status === 'scored') state.tally.done++
     else if (d.status === 'failed' || d.status === 'parse_fail') state.tally.fail++
     if (FINAL_STATUS.has(d.status)) {
-      state.scoreFeed.push({ file: d.file, status: d.status, score: d.score, error: d.error, cached: d.cached, session_id: d.session_id })
+      state.scoreFeed.push({ file: d.file, status: d.status, score: d.score, error: d.error, cached: d.cached, session_id: d.session_id, photo_id: d.photo_id })
       if (state.scoreFeed.length > 10) state.scoreFeed.splice(0, state.scoreFeed.length - 10)
     }
     // 评分成功：摘除强制/重试标记

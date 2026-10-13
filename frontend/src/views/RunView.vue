@@ -187,7 +187,8 @@
       <div v-if="state.scoreFeed.length">
         <div class="muted" style="margin: 6px 0 4px">最近评完（{{ state.scoreFeed.length }} 条）：</div>
         <div class="feed">
-          <div v-for="(p, i) in state.scoreFeed" :key="i" class="feed-item">
+          <div v-for="(p, i) in state.scoreFeed" :key="i" class="feed-item clickable"
+            :title="p.photo_id ? '点击查看大图与评分详情' : ''" @click="openFeedPhoto(p)">
             <span class="mono">{{ iconOf(p.status) }}</span>
             <span class="fname" :title="p.file">{{ p.file }}</span>
             <span v-if="p.status === 'scored'" class="score">{{ p.score.toFixed(1) }} 分</span>
@@ -201,6 +202,8 @@
         </div>
       </div>
     </div>
+    <PhotoModal v-if="preview" :photo="preview" :busy="state.running" :list="feedPhotoList"
+      @close="preview = null" @navigate="onFeedNavigate" @deleted="onFeedDeleted" @rescored="onFeedRescored" />
   </div>
 </template>
 
@@ -208,6 +211,40 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { state, taskOf, api, toast, refreshState, refreshModels, requestNotifyPermission } from '../store.js'
 import { confirmDialog } from '../confirm.js'
+import PhotoModal from '../components/PhotoModal.vue'
+
+// 最近评完条目 → 点击弹窗查看（与图库同款）
+const preview = ref(null)
+const feedPhotoList = computed(() => state.scoreFeed.filter((f) => f.photo_id).map((f) => ({ id: f.photo_id })))
+async function openFeedPhoto(f) {
+  if (!f.photo_id) return
+  try {
+    preview.value = await api(`/api/photo?id=${f.photo_id}`)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+async function onFeedNavigate(item) {
+  if (!item || !item.id) return
+  try {
+    preview.value = await api(`/api/photo?id=${item.id}`)
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+function onFeedDeleted(photo) {
+  preview.value = null
+  // 从最近评完移除该条（文件已删）
+  const i = state.scoreFeed.findIndex((f) => f.photo_id === photo.id)
+  if (i >= 0) state.scoreFeed.splice(i, 1)
+}
+function onFeedRescored() {
+  // 重评后刷新当前弹窗照片的分数到 feed 条目（轻量同步）
+  if (preview.value && preview.value.id) {
+    const f = state.scoreFeed.find((x) => x.photo_id === preview.value.id)
+    if (f && typeof preview.value.score === 'number') f.score = preview.value.score
+  }
+}
 
 const loadingModels = ref(false)
 const showAllModels = ref(false) // false=仅视觉过滤后的模型；true=平台全部模型
@@ -788,6 +825,8 @@ onMounted(async () => {
 .retry-tag { background: #1f2c3a; color: #10aeff; }
 .title.sub { margin-top: 6px; font-size: 14px; }
 .feed { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
+.feed-item.clickable { cursor: pointer; }
+.feed-item.clickable:hover { background: var(--card-2); border-radius: 6px; }
 .feed-item { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 4px; border-radius: 6px; }
 .feed-item:hover { background: var(--card-2); }
 .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
