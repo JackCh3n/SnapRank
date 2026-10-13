@@ -124,6 +124,7 @@
             @click="confirmDel = true">🗑 删除文件</button>
           <button class="btn plain small" @click="$emit('close')">关闭</button>
         </div>
+        <div class="pm-key-hint">⌨ ←/→ 切换照片 · Delete 删除（Enter 确认） · Esc 关闭</div>
       </div>
     </div>
 
@@ -234,6 +235,10 @@ function onKey(e) {
 }
 onMounted(() => {
   window.addEventListener('keydown', onKey)
+  // 移出可能残留的输入框焦点：否则 ←/→/Delete 会被输入框吞掉（快捷键失灵）
+  if (document.activeElement && document.activeElement.blur && document.activeElement.tagName !== 'BODY') {
+    document.activeElement.blur()
+  }
   loadHistory() // 首次打开弹窗加载评分历史
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
@@ -627,6 +632,7 @@ async function copyShareCard() {
 .fav-on { color: #fa5151; font-weight: 600; }
 
 .pm-history { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.pm-key-hint { color: var(--text-2); font-size: 11px; text-align: center; padding-top: 8px; }
 .pm-h-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
 .pm-h-models { display: flex; gap: 4px; flex-wrap: wrap; }
 .pm-h-tip { color: var(--text-2); font-size: 11px; margin-left: auto; }
