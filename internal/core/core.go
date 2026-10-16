@@ -541,7 +541,16 @@ type GalleryItem struct {
 	RawSiblings []string `json:"raw_siblings,omitempty"`   // 同名 RAW/HEIC 伴生文件
 }
 
-var rawSiblingExts = []string{".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
+var rawSiblingExts = archive.RawSiblingExts // 同名伴生文件扩展名（与归档共用同一份）
+
+// ArchivedCount 已归档照片记录数（源文件已移出，图库/复核页不展示；前端提示可还原）
+func (c *Core) ArchivedCount() int {
+	n, err := c.st.CountArchivedPhotos()
+	if err != nil {
+		return 0
+	}
+	return n
+}
 
 // Gallery 图库：所有批次照片按源文件去重。
 // 不展示不支持的格式（RAW/HEIC 等登记项）与源文件已删除的照片；

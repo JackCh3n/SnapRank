@@ -168,7 +168,7 @@
         </div>
         <div class="muted" style="font-size: 12px; margin-top: 6px">
           分桶规则：6.0-6.5、6.6-7.0、7.1-7.5 各一个文件夹；7.6 起每 0.1 分一个文件夹（7.6、7.7…10.0）。
-          已归档过的照片自动跳过；同名冲突自动加序号。
+          已归档过的照片自动跳过；同名冲突自动加序号；同名 RAW/HEIC 伴生文件（.raf/.cr2/.nef…）跟随主图一起移动/复制。
         </div>
         <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
           <select v-model="scoreArchiveMode" style="width: 130px" title="移动=剪切源文件；复制=保留源文件">
@@ -427,7 +427,7 @@ async function doScoreArchive() {
     const dest = scoreArchiveDest.value.trim() || defaultArchiveDest.value
     const r = await api('/api/gallery/score-archive', { method: 'POST', body: JSON.stringify({ ids, mode: scoreArchiveMode.value, dest_dir: dest }) })
     saveArchiveDest()
-    toast(`分值归档完成：${r.placed} 张${r.skipped ? `（${r.skipped} 张已归档过跳过）` : ''} → ${r.dir}`)
+    toast(`分值归档完成：${r.placed} 张${r.raws ? ` + RAW ${r.raws} 个` : ''}${r.skipped ? `（${r.skipped} 张已归档过跳过）` : ''} → ${r.dir}`)
     scoreArchiveOpen.value = false
     load()
   } catch (e) {

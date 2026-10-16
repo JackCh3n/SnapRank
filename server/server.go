@@ -124,6 +124,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"queue":        eng.QueueStatus(),
 		"pools":        eng.PoolsState(), // 压缩池 + 各模型池状态（前端面板）
 		"summary":      sum,
+		"archived_count": s.core.ArchivedCount(), // 已归档照片数（源文件已移出，可还原）
 		"version":      Version,
 	})
 }

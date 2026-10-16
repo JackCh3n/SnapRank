@@ -707,6 +707,13 @@ func (s *Store) ArchivedPhotos() ([]*Photo, error) {
 	return list, rows.Err()
 }
 
+// CountArchivedPhotos 已归档照片记录数（源文件已移出，图库不再展示；前端提示可还原用）
+func (s *Store) CountArchivedPhotos() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM photos WHERE archived_path != ''`).Scan(&n)
+	return n, err
+}
+
 // FailedPhotosWithScores 状态是失败/解析失败、但有成功评分记录（含维度分）的照片。
 // 多模型下主模型失败曾覆盖其它模型的成功结果，启动时按新口径（任一模型成功即算
 // 评完）修复这批历史数据。

@@ -66,6 +66,97 @@ func Place(sessionDir, bucket, srcPath, fingerprint string, mode Mode) (dest str
 	return dest, false, nil
 }
 
+// RawSiblingExts 同名伴生文件扩展名（RAW/HEIC 等）：删除/归档/还原时联动处理
+var RawSiblingExts = []string{".raf", ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
+
+// rawSiblings 列出与 stem（不含扩展名的完整路径）同名的伴生文件（.raf/.cr2…），
+// 排除自身扩展名（selfExt）；按真实文件名返回（保留原名大小写）。
+func rawSiblings(stem, selfExt string) []string {
+	dir := filepath.Dir(stem)
+	want := strings.ToLower(filepath.Base(stem))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := filepath.Ext(name)
+		if strings.EqualFold(ext, selfExt) {
+			continue // 排除自身
+		}
+		matched := false
+		for _, x := range RawSiblingExts {
+			if strings.EqualFold(x, ext) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if strings.ToLower(strings.TrimSuffix(name, ext)) == want {
+			out = append(out, filepath.Join(dir, name))
+		}
+	}
+	return out
+}
+
+// PlaceRaws 归档时把与主图同名的伴生文件（RAW/HEIC）按同样的方式放到归档位置，
+// 文件名跟随已放置的主图（destPath）主名，保持成对命名；目标已有同名伴生文件时
+// 不覆盖（视为已归档）。返回放置数、跳过数与错误列表。
+func PlaceRaws(destPath, srcPath string, mode Mode) (moved, skipped int, errs []string) {
+	if destPath == "" || srcPath == "" {
+		return 0, 0, nil
+	}
+	destStem := strings.TrimSuffix(destPath, filepath.Ext(destPath))
+	srcStem := strings.TrimSuffix(srcPath, filepath.Ext(srcPath))
+	for _, srcRaw := range rawSiblings(srcStem, filepath.Ext(srcPath)) {
+		destRaw := destStem + filepath.Ext(srcRaw)
+		if _, err := os.Stat(destRaw); err == nil {
+			skipped++
+			continue
+		}
+		var err error
+		if mode == Move {
+			err = MoveTo(srcRaw, destRaw)
+		} else {
+			err = copyFile(srcRaw, destRaw)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", filepath.Base(srcRaw), err))
+			continue
+		}
+		moved++
+	}
+	return moved, skipped, errs
+}
+
+// RestoreRaws 还原归档时把归档目录里与主图同名的伴生文件一起移回原目录，
+// 命名跟随还原后的主图（destPhotoPath）；目标已有同名文件时不覆盖。
+func RestoreRaws(archivedPhotoPath, destPhotoPath string) (restored int, errs []string) {
+	if archivedPhotoPath == "" || destPhotoPath == "" {
+		return 0, nil
+	}
+	destStem := strings.TrimSuffix(destPhotoPath, filepath.Ext(destPhotoPath))
+	srcStem := strings.TrimSuffix(archivedPhotoPath, filepath.Ext(archivedPhotoPath))
+	for _, srcRaw := range rawSiblings(srcStem, filepath.Ext(archivedPhotoPath)) {
+		destRaw := destStem + filepath.Ext(srcRaw)
+		if _, err := os.Stat(destRaw); err == nil {
+			continue // 原目录已有同名伴生文件：不覆盖
+		}
+		if err := MoveTo(srcRaw, destRaw); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", filepath.Base(srcRaw), err))
+			continue
+		}
+		restored++
+	}
+	return restored, errs
+}
+
 // MoveTo 把源文件移动到目标路径（自动建目录；跨卷/被占用时回退复制+删除）。
 // 还原归档用：把归档目录里的文件移回原路径。
 func MoveTo(src, dest string) error {

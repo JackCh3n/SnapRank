@@ -19,7 +19,10 @@
           <div class="bar-name">{{ b.name }}</div>
         </div>
       </div>
-      <div v-else class="muted">暂无评分结果：请先到「运行」页完成一次评分</div>
+      <div v-else class="muted">
+        <template v-if="archivedCount">全部评分照片均已归档（源文件已移入归档目录，共 {{ archivedCount }} 张）；用下方「↩ 还原归档」可按内容匹配找回。</template>
+        <template v-else>暂无评分结果：请先到「运行」页完成一次评分</template>
+      </div>
       <div class="row" style="margin-top: 10px" v-if="failTotal > 0">
         <button class="btn plain" :disabled="state.running" @click="rescoreAllFailed">
           ↻ 一键重试全部失败（{{ failTotal }} 张{{ failDetail }}）
@@ -41,9 +44,10 @@
       </div>
     </div>
 
-    <!-- 归档确认（两阶段） -->
-    <div class="card" v-if="summary && totalScored > 0">
-      <h3 class="title">确认归档 <span class="muted">（默认复制，移动需显式选择）</span></h3>
+    <!-- 归档确认（两阶段）；全部归档后卡片保留：还原入口必须可达 -->
+    <div class="card" v-if="summary || totalScored > 0 || archivedCount > 0">
+      <h3 class="title">确认归档 <span class="muted">（默认复制，移动需显式选择）</span>
+        <span v-if="archivedCount" class="tag">已归档 {{ archivedCount }} 张</span></h3>
       <div class="row">
         <label class="field">
           归档方式
@@ -56,19 +60,22 @@
           归档根目录
           <input style="width: 320px" v-model="archiveRoot" />
         </label>
-        <button class="btn" :disabled="archiving || state.running" @click="doArchive">执行归档</button>
-        <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || summary.archive_dir" @click="openFolder">打开归档目录</button>
+        <button class="btn" :disabled="archiving || state.running || !totalScored" @click="doArchive">执行归档</button>
+        <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || (summary && summary.archive_dir)" @click="openFolder">打开归档目录</button>
         <button class="btn plain" :disabled="state.running" title="把归档目录里的照片按内容匹配移回各自原始目录（可先选目录）"
           @click="restoreOpen = true">↩ 还原归档…</button>
       </div>
+      <div v-if="!totalScored && archivedCount" class="muted" style="margin-top: 6px">
+        没有待归档的评分照片；已归档的 {{ archivedCount }} 张可用「↩ 还原归档」按内容匹配找回。
+      </div>
       <div v-if="archiveResult" class="muted" style="margin-top: 8px">
-        ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }} →
+        ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }}<template v-if="archiveResult.raws"> · 含 RAW {{ archiveResult.raws }} 个</template> →
         {{ archiveResult.dir }}
         <a v-if="archiveResult.report_csv" href="/api/report" download>下载 report.csv</a>
         <div v-for="(e, i) in archiveResult.errors || []" :key="i" class="error-text">{{ e }}</div>
       </div>
       <div class="muted" style="margin-top: 6px">
-        说明：解析失败的照片不会移动，仅记录在报告「29_待复检」；解码失败/不支持的文件留在原目录。
+        说明：解析失败的照片不会移动，仅记录在报告「29_待复检」；解码失败/不支持的文件留在原目录；同名 RAW/HEIC 伴生文件跟随主图一起归档。
       </div>
     </div>
 
@@ -78,14 +85,14 @@
         <h3 class="title">↩ 还原归档</h3>
         <div class="muted" style="margin: 6px 0 8px">
           扫描下面目录里的图片，按<b>内容指纹</b>匹配已归档记录，移回各自原始目录（同名不同内容自动改名，不覆盖）。
-          归档目录被整体搬走过也没关系——指到搬去的地方即可。
+          归档目录被整体搬走过也没关系——指到搬去的地方即可。归档时一起带走的同名 RAW/HEIC 伴生文件也会跟随主图还原。
         </div>
         <div class="row" style="gap: 6px; align-items: center">
           <input style="flex: 1" v-model="restoreDir" placeholder="还原来源目录（例如 E:\fuji\SnapRank）" @keyup.enter="doRestore" />
           <button class="btn plain small" :disabled="restoring" @click="pickRestoreDir">选择目录</button>
         </div>
         <div v-if="restoreResult" class="muted" style="margin-top: 10px">
-          ✅ 移回 {{ restoreResult.restored }} 张<span v-if="restoreResult.conflict">（其中 {{ restoreResult.conflict }} 张改名放回）</span>
+          ✅ 移回 {{ restoreResult.restored }} 张<span v-if="restoreResult.conflict">（其中 {{ restoreResult.conflict }} 张改名放回）</span><span v-if="restoreResult.raws">、RAW/伴生 {{ restoreResult.raws }} 个</span>
           · 原目录已有同内容 {{ restoreResult.same }} · 未找到 {{ restoreResult.not_found }} · 失败 {{ restoreResult.failed }}
           <div v-for="(e, i) in restoreResult.errors || []" :key="i" class="error-text">{{ e }}</div>
         </div>
@@ -184,6 +191,7 @@ const w = ref({ technique: 0.4, composition: 0.3, content: 0.2, color: 0.1 })
 const mode = ref('copy')
 const archiveRoot = ref('')
 const allItems = ref([]) // 全部图片（/api/gallery 按源文件去重，合并视图）
+const archivedCount = ref(0) // 已归档照片数（源文件已移出，用于提示可还原）
 const photos = ref([]) // 按范围筛选后的列表
 const recalcing = ref(false)
 const archiving = ref(false)
@@ -221,6 +229,9 @@ async function loadAll() {
   try {
     allItems.value = await api('/api/gallery')
   } catch { /* 尚无会话 */ }
+  try {
+    archivedCount.value = (await api('/api/state')).archived_count || 0
+  } catch { /* 忽略 */ }
   applyScope()
 }
 function applyScope() {
@@ -402,6 +413,7 @@ async function doArchive() {
     }
     archiveResult.value = await api('/api/archive', { method: 'POST', body: JSON.stringify({ mode: mode.value, session: '__ALL__' }) })
     toast('归档完成')
+    loadAll() // 归档后图库列表/已归档数变化，刷新卡片状态
   } catch (e) {
     toast(e.message, true)
   }
@@ -430,7 +442,7 @@ async function doRestore() {
     restoreResult.value = await api('/api/archive/restore', { method: 'POST', body: JSON.stringify({ dir }) })
     localStorage.setItem('sr_restore_dir', dir)
     const r = restoreResult.value
-    toast(`还原完成：移回 ${r.restored} 张（未找到 ${r.not_found}）`)
+    toast(`还原完成：移回 ${r.restored} 张${r.raws ? `、RAW ${r.raws} 个` : ''}（未找到 ${r.not_found}）`)
     loadAll() // 统计/列表跟着刷新
   } catch (e) {
     toast(e.message, true)

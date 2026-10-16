@@ -2038,6 +2038,7 @@ type ArchiveSummary struct {
 	Placed    int            `json:"placed"`
 	Skipped   int            `json:"skipped"`
 	Failed    int            `json:"failed"`
+	Raws      int            `json:"raws"` // 连带归档的同名 RAW/HEIC 伴生文件数
 	Dir       string         `json:"dir"`
 	Buckets   map[string]int `json:"buckets"`
 	ReportCSV string         `json:"report_csv"`
@@ -2108,15 +2109,19 @@ func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode, destDir string) (*
 			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", p.Filename, perr))
 			continue
 		}
-		if skipped {
-			sum.Skipped++
-		} else {
-			sum.Placed++
+			if skipped {
+				sum.Skipped++
+			} else {
+				sum.Placed++
+			}
+			sum.Buckets[bucket]++
+			e.store.SetPhotoArchived(p.ID, dest)
+			// 同名 RAW/HEIC 伴生文件跟随主图一起归档（保持成对命名）
+			moved, _, rerrs := archive.PlaceRaws(dest, p.SrcPath, mode)
+			sum.Raws += moved
+			sum.Errors = append(sum.Errors, rerrs...)
 		}
-		sum.Buckets[bucket]++
-		e.store.SetPhotoArchived(p.ID, dest)
-	}
-	if sum.Placed == 0 && sum.Skipped == 0 {
+		if sum.Placed == 0 && sum.Skipped == 0 {
 		return nil, errors.New("没有可归档的照片（需要有分数且源文件存在）")
 	}
 	return sum, nil
@@ -2127,6 +2132,7 @@ type RestoreSummary struct {
 	Dir      string   `json:"dir"`      // 从哪个目录还原
 	Scanned  int      `json:"scanned"`  // 该目录下扫描到的图片数
 	Restored int      `json:"restored"` // 按内容匹配并移回原目录的张数
+	Raws     int      `json:"raws"`     // 连带还原的同名 RAW/HEIC 伴生文件数
 	Same     int      `json:"same"`     // 原目录已有同内容文件（视为已还原）
 	Conflict int      `json:"conflict"` // 原目录已有同名不同内容：改名放回
 	NotFound int      `json:"not_found"`// 在该目录里没找到对应文件的已归档照片数
@@ -2172,6 +2178,10 @@ func (e *Engine) RestoreArchive(dir string) (*RestoreSummary, error) {
 			if archive.SameContent(dest, p.Fingerprint) {
 				sum.Same++ // 原目录已有同内容文件：清掉归档标记即可
 				e.store.SetPhotoArchived(p.ID, "")
+				// 伴生文件若还留在归档目录，一并移回
+				n, rerrs := archive.RestoreRaws(path, dest)
+				sum.Raws += n
+				sum.Errors = append(sum.Errors, rerrs...)
 				return
 			}
 			dest = archive.UniqueName(filepath.Dir(dest), dest) // 同名不同内容：改名放回
@@ -2184,6 +2194,10 @@ func (e *Engine) RestoreArchive(dir string) (*RestoreSummary, error) {
 		}
 		e.store.SetPhotoArchived(p.ID, "")
 		sum.Restored++
+		// 同名 RAW/HEIC 伴生文件跟随主图一起还原（命名跟随还原后的主图名）
+		n, rerrs := archive.RestoreRaws(path, dest)
+		sum.Raws += n
+		sum.Errors = append(sum.Errors, rerrs...)
 	}
 	filepath.Walk(dir, func(path string, info os.FileInfo, werr error) error {
 		if werr != nil || info.IsDir() {
@@ -2249,6 +2263,7 @@ func (e *Engine) archiveAll(mode archive.Mode) (*ArchiveSummary, error) {
 		agg.Placed += sum.Placed
 		agg.Skipped += sum.Skipped
 		agg.Failed += sum.Failed
+		agg.Raws += sum.Raws
 		agg.Errors = append(agg.Errors, sum.Errors...)
 		for b, n := range sum.Buckets {
 			agg.Buckets[b] += n
@@ -2299,6 +2314,10 @@ func (e *Engine) archiveOne(mode archive.Mode, sessID string) (*ArchiveSummary, 
 			}
 			sum.Buckets[bucket]++
 			e.store.SetPhotoArchived(p.ID, dest)
+			// 同名 RAW/HEIC 伴生文件跟随主图一起归档
+			moved, _, rerrs := archive.PlaceRaws(dest, p.SrcPath, mode)
+			sum.Raws += moved
+			sum.Errors = append(sum.Errors, rerrs...)
 			rows = append(rows, toRow(p, bucket))
 			continue
 		}
@@ -2316,6 +2335,10 @@ func (e *Engine) archiveOne(mode archive.Mode, sessID string) (*ArchiveSummary, 
 		}
 		sum.Buckets[bucket]++
 		e.store.SetPhotoArchived(p.ID, dest)
+		// 同名 RAW/HEIC 伴生文件跟随主图一起归档
+		moved, _, rerrs := archive.PlaceRaws(dest, p.SrcPath, mode)
+		sum.Raws += moved
+		sum.Errors = append(sum.Errors, rerrs...)
 		rows = append(rows, toRow(p, bucket))
 	}
 	// 失败类照片仅进报告（文件留在原目录）
