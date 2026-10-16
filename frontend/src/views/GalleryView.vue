@@ -153,8 +153,12 @@
       <div class="cf-card" style="border-color: var(--accent)">
         <h3 class="title">📁 分值归档</h3>
         <div class="muted" style="margin: 6px 0 8px">
-          把当前筛选的 <b>{{ scoreArchiveCount }}</b> 张已评分照片按分值放入
-          <b>{{ archiveRoot || '归档目录' }}</b> 下的分值文件夹：
+          把当前筛选的 <b>{{ scoreArchiveCount }}</b> 张已评分照片按分值放入下列目录的分值文件夹
+          （默认放在照片所在盘，避免塞满 C 盘）：
+        </div>
+        <div class="row" style="gap: 6px; align-items: center; margin-bottom: 8px">
+          <input style="flex: 1" v-model="scoreArchiveDest" :placeholder="defaultArchiveDest" @change="saveArchiveDest" />
+          <button class="btn plain small" @click="pickArchiveDest">选择目录</button>
         </div>
         <div class="bucket-list">
           <div v-for="bk in scoreBuckets" :key="bk[0]" class="row" style="justify-content: space-between; padding: 2px 4px">
@@ -376,7 +380,26 @@ const confirmOpen = ref(false)
 const scoreArchiveOpen = ref(false)
 const scoreArchiveMode = ref('move')
 const scoreArchiving = ref(false)
-const archiveRoot = computed(() => state.config?.paths?.archive_root || '')
+// 归档目标目录：默认按第一批照片的源目录推导到同级 SnapRank（同一块盘，不塞 C 盘），可改并记住
+const scoreArchiveDest = ref(localStorage.getItem('sr_score_archive_dest') || '')
+const defaultArchiveDest = computed(() => {
+  const p = filtered.value.find((x) => x.status === 'scored') || filtered.value[0]
+  const src = p && p.src_path ? String(p.src_path).split('\\').join('/') : ''
+  const dir = src.slice(0, src.lastIndexOf('/'))
+  const parent = dir.slice(0, dir.lastIndexOf('/'))
+  return parent ? parent + '/SnapRank' : '选择归档目标目录'
+})
+function saveArchiveDest() {
+  localStorage.setItem('sr_score_archive_dest', scoreArchiveDest.value.trim())
+}
+async function pickArchiveDest() {
+  try {
+    const r = await api('/api/pick-dir', { method: 'POST', body: '{}' })
+    if (r.dir) { scoreArchiveDest.value = r.dir; saveArchiveDest() }
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
 const scoreArchiveCount = computed(() => filtered.value.filter((p) => p.status === 'scored').length)
 // 分桶口径与后端 ScoreBucket 一致：<6.0 一桶；6.0-6.5 / 6.6-7.0 / 7.1-7.5；7.6 起每 0.1 一桶
 function scoreBucketOf(s) {
@@ -401,7 +424,9 @@ async function doScoreArchive() {
   if (!ids.length) return
   scoreArchiving.value = true
   try {
-    const r = await api('/api/gallery/score-archive', { method: 'POST', body: JSON.stringify({ ids, mode: scoreArchiveMode.value }) })
+    const dest = scoreArchiveDest.value.trim() || defaultArchiveDest.value
+    const r = await api('/api/gallery/score-archive', { method: 'POST', body: JSON.stringify({ ids, mode: scoreArchiveMode.value, dest_dir: dest }) })
+    saveArchiveDest()
     toast(`分值归档完成：${r.placed} 张${r.skipped ? `（${r.skipped} 张已归档过跳过）` : ''} → ${r.dir}`)
     scoreArchiveOpen.value = false
     load()

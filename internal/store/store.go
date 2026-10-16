@@ -689,6 +689,24 @@ func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 	return list, rows.Err()
 }
 
+// ArchivedPhotos 已归档（archived_path 非空）的照片，还原归档用
+func (s *Store) ArchivedPhotos() ([]*Photo, error) {
+	rows, err := s.db.Query(`SELECT ` + photoCols + ` FROM photos WHERE archived_path != '' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
 // FailedPhotosWithScores 状态是失败/解析失败、但有成功评分记录（含维度分）的照片。
 // 多模型下主模型失败曾覆盖其它模型的成功结果，启动时按新口径（任一模型成功即算
 // 评完）修复这批历史数据。

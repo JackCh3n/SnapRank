@@ -2061,10 +2061,10 @@ func ScoreBucket(score float64) string {
 	}
 }
 
-// ScoreArchive 分值归档：把指定照片按分值分桶移动/复制到归档根目录下的分值
-// 文件夹（6.0-6.5、6.6-7.0、7.1-7.5，7.6 起每 0.1 一档）。只处理有分数的照片；
-// 已归档过的跳过。图库「分值归档」按钮用（先删低分再按分值整理的工作流）。
-func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode) (*ArchiveSummary, error) {
+// ScoreArchive 分值归档：把指定照片按分值分桶移动/复制到目标目录下的分值文件夹
+// （6.0-6.5、6.6-7.0、7.1-7.5，7.6 起每 0.1 一档）。只处理有分数的照片；已归档过的
+// 跳过。destDir 为空时按源图所在盘推导（<源图父目录>\SnapRank），避免默认塞满 C 盘。
+func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode, destDir string) (*ArchiveSummary, error) {
 	if e.IsRunning() {
 		return nil, errors.New("任务运行中，请先停止或等待完成")
 	}
@@ -2074,8 +2074,16 @@ func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode) (*ArchiveSummary, 
 	if len(ids) == 0 {
 		return nil, errors.New("未选择要归档的照片")
 	}
-	cfg := e.cfgFn()
-	root := cfg.Paths.ArchiveRoot
+	// 目标目录：优先用传入值；否则按第一张照片的源目录推导到同级 SnapRank（同一块盘）
+	root := strings.TrimSpace(destDir)
+	if root == "" {
+		if p, err := e.store.GetPhoto(ids[0]); err == nil && p != nil && p.SrcPath != "" {
+			root = filepath.Join(filepath.Dir(filepath.Dir(p.SrcPath)), "SnapRank")
+		}
+	}
+	if root == "" {
+		root = e.cfgFn().Paths.ArchiveRoot
+	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
@@ -2110,6 +2118,97 @@ func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode) (*ArchiveSummary, 
 	}
 	if sum.Placed == 0 && sum.Skipped == 0 {
 		return nil, errors.New("没有可归档的照片（需要有分数且源文件存在）")
+	}
+	return sum, nil
+}
+
+// RestoreSummary 归档还原结果
+type RestoreSummary struct {
+	Dir      string   `json:"dir"`      // 从哪个目录还原
+	Scanned  int      `json:"scanned"`  // 该目录下扫描到的图片数
+	Restored int      `json:"restored"` // 按内容匹配并移回原目录的张数
+	Same     int      `json:"same"`     // 原目录已有同内容文件（视为已还原）
+	Conflict int      `json:"conflict"` // 原目录已有同名不同内容：改名放回
+	NotFound int      `json:"not_found"`// 在该目录里没找到对应文件的已归档照片数
+	Failed   int      `json:"failed"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+// RestoreArchive 还原归档：把 dir 下的图片按**内容指纹**匹配已归档记录，移回各自
+// 原始源目录（src_path）。按内容匹配可正确处理「已改名」「同名不同内容」「整个归档
+// 目录被搬走」等情况。还原成功后清掉 archived_path，照片重新出现在图库。
+func (e *Engine) RestoreArchive(dir string) (*RestoreSummary, error) {
+	if e.IsRunning() {
+		return nil, errors.New("任务运行中，请先停止或等待完成")
+	}
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = e.cfgFn().Paths.ArchiveRoot
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("目录不存在或不可读: %s", dir)
+	}
+	photos, err := e.store.ArchivedPhotos()
+	if err != nil {
+		return nil, err
+	}
+	sum := &RestoreSummary{Dir: dir}
+	if len(photos) == 0 {
+		return sum, nil
+	}
+	// 指纹 → 待还原照片（同一指纹的多条记录：一个文件只能还原一条）
+	byFP := map[string][]*store.Photo{}
+	for _, p := range photos {
+		byFP[p.Fingerprint] = append(byFP[p.Fingerprint], p)
+	}
+	restoreOne := func(path string, p *store.Photo) {
+		dest := p.SrcPath
+		if dest == "" {
+			sum.Failed++
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: 记录缺少原始路径", filepath.Base(path)))
+			return
+		}
+		if _, err := os.Stat(dest); err == nil {
+			if archive.SameContent(dest, p.Fingerprint) {
+				sum.Same++ // 原目录已有同内容文件：清掉归档标记即可
+				e.store.SetPhotoArchived(p.ID, "")
+				return
+			}
+			dest = archive.UniqueName(filepath.Dir(dest), dest) // 同名不同内容：改名放回
+			sum.Conflict++
+		}
+		if err := archive.MoveTo(path, dest); err != nil {
+			sum.Failed++
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", filepath.Base(path), err))
+			return
+		}
+		e.store.SetPhotoArchived(p.ID, "")
+		sum.Restored++
+	}
+	filepath.Walk(dir, func(path string, info os.FileInfo, werr error) error {
+		if werr != nil || info.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if !compress.SupportedExts[ext] && !compress.UnsupportedExts[ext] {
+			return nil
+		}
+		fpv, ferr := fp.OfFile(path)
+		if ferr != nil {
+			return nil
+		}
+		sum.Scanned++
+		list := byFP[fpv]
+		if len(list) == 0 {
+			return nil
+		}
+		p := list[0]
+		byFP[fpv] = list[1:]
+		restoreOne(path, p)
+		return nil
+	})
+	for _, rest := range byFP {
+		sum.NotFound += len(rest)
 	}
 	return sum, nil
 }

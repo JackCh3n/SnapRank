@@ -85,6 +85,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/pick-dir", s.handlePickDir)
 	s.mux.HandleFunc("POST /api/import", s.handleImport)
 	s.mux.HandleFunc("POST /api/archive", s.handleArchive)
+	s.mux.HandleFunc("POST /api/archive/restore", s.handleArchiveRestore)
 	s.mux.HandleFunc("GET /api/thumb", s.handleThumb)
 	s.mux.HandleFunc("GET /api/report", s.handleReport)
 	s.mux.HandleFunc("GET /api/report/export", s.handleReportExport)
@@ -427,11 +428,12 @@ func (s *Server) handleGallery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, items)
 }
 
-// handleScoreArchive 分值归档：按分值分桶移动/复制到归档根目录下的分值文件夹
+// handleScoreArchive 分值归档：按分值分桶移动/复制到目标目录下的分值文件夹
 func (s *Server) handleScoreArchive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		IDs  []int64 `json:"ids"`
-		Mode string  `json:"mode"` // move | copy（默认 move）
+		IDs     []int64 `json:"ids"`
+		Mode    string  `json:"mode"`     // move | copy（默认 move）
+		DestDir string  `json:"dest_dir"` // 目标目录；空=按源图所在盘推导（<源图父目录>\SnapRank）
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
@@ -441,7 +443,24 @@ func (s *Server) handleScoreArchive(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		mode = archive.Move
 	}
-	res, err := s.core.Engine().ScoreArchive(req.IDs, mode)
+	res, err := s.core.Engine().ScoreArchive(req.IDs, mode, req.DestDir)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, res)
+}
+
+// handleArchiveRestore 还原归档：按内容匹配把归档目录里的图片移回各自原始目录
+func (s *Server) handleArchiveRestore(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Dir string `json:"dir"` // 从哪个目录还原（空=归档根目录）
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	res, err := s.core.Engine().RestoreArchive(req.Dir)
 	if err != nil {
 		writeErr(w, 400, err)
 		return

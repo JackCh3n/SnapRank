@@ -66,6 +66,30 @@ func Place(sessionDir, bucket, srcPath, fingerprint string, mode Mode) (dest str
 	return dest, false, nil
 }
 
+// MoveTo 把源文件移动到目标路径（自动建目录；跨卷/被占用时回退复制+删除）。
+// 还原归档用：把归档目录里的文件移回原路径。
+func MoveTo(src, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+	if cerr := copyFile(src, dest); cerr != nil {
+		return cerr
+	}
+	return os.Remove(src)
+}
+
+// SameContent 文件内容是否与指纹一致（还原归档按内容匹配用）
+func SameContent(path, fingerprint string) bool {
+	same, err := sameContent(path, fingerprint)
+	return err == nil && same
+}
+
+// UniqueName 目标目录下同名的可用路径（冲突时加序号）
+func UniqueName(dir, srcPath string) string { return uniqueName(dir, srcPath) }
+
 func sameContent(path, fingerprint string) (bool, error) {
 	f, err := fp.OfFile(path)
 	if err != nil {

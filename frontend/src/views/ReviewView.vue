@@ -119,6 +119,8 @@
         </label>
         <button class="btn" :disabled="archiving || state.running" @click="doArchive">执行归档</button>
         <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || summary.archive_dir" @click="openFolder">打开归档目录</button>
+        <button class="btn plain" :disabled="state.running" title="把归档目录里的照片按内容匹配移回各自原始目录（可先选目录）"
+          @click="restoreOpen = true">↩ 还原归档…</button>
       </div>
       <div v-if="archiveResult" class="muted" style="margin-top: 8px">
         ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }} →
@@ -128,6 +130,32 @@
       </div>
       <div class="muted" style="margin-top: 6px">
         说明：解析失败的照片不会移动，仅记录在报告「29_待复检」；解码失败/不支持的文件留在原目录。
+      </div>
+    </div>
+
+    <!-- 还原归档：按内容把归档目录里的照片移回原始目录 -->
+    <div v-if="restoreOpen" class="cf-mask" @click.self="restoreOpen = false">
+      <div class="cf-card" style="border-color: var(--accent)">
+        <h3 class="title">↩ 还原归档</h3>
+        <div class="muted" style="margin: 6px 0 8px">
+          扫描下面目录里的图片，按<b>内容指纹</b>匹配已归档记录，移回各自原始目录（同名不同内容自动改名，不覆盖）。
+          归档目录被整体搬走过也没关系——指到搬去的地方即可。
+        </div>
+        <div class="row" style="gap: 6px; align-items: center">
+          <input style="flex: 1" v-model="restoreDir" placeholder="还原来源目录（例如 E:\fuji\SnapRank）" @keyup.enter="doRestore" />
+          <button class="btn plain small" :disabled="restoring" @click="pickRestoreDir">选择目录</button>
+        </div>
+        <div v-if="restoreResult" class="muted" style="margin-top: 10px">
+          ✅ 移回 {{ restoreResult.restored }} 张<span v-if="restoreResult.conflict">（其中 {{ restoreResult.conflict }} 张改名放回）</span>
+          · 原目录已有同内容 {{ restoreResult.same }} · 未找到 {{ restoreResult.not_found }} · 失败 {{ restoreResult.failed }}
+          <div v-for="(e, i) in restoreResult.errors || []" :key="i" class="error-text">{{ e }}</div>
+        </div>
+        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
+          <button class="btn plain" @click="restoreOpen = false">关闭</button>
+          <button class="btn" :disabled="restoring || !restoreDir.trim()" @click="doRestore">
+            {{ restoring ? '还原中…（大目录要算指纹，请稍候）' : '开始还原' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -380,6 +408,36 @@ async function doArchive() {
   archiving.value = false
 }
 
+// ---------- 还原归档：按内容把归档目录里的照片移回原始目录 ----------
+const restoreOpen = ref(false)
+const restoreDir = ref(localStorage.getItem('sr_restore_dir') || '')
+const restoring = ref(false)
+const restoreResult = ref(null)
+async function pickRestoreDir() {
+  try {
+    const r = await api('/api/pick-dir', { method: 'POST', body: '{}' })
+    if (r.dir) { restoreDir.value = r.dir; localStorage.setItem('sr_restore_dir', r.dir) }
+  } catch (e) {
+    toast(e.message, true)
+  }
+}
+async function doRestore() {
+  const dir = restoreDir.value.trim()
+  if (!dir) return
+  restoring.value = true
+  restoreResult.value = null
+  try {
+    restoreResult.value = await api('/api/archive/restore', { method: 'POST', body: JSON.stringify({ dir }) })
+    localStorage.setItem('sr_restore_dir', dir)
+    const r = restoreResult.value
+    toast(`还原完成：移回 ${r.restored} 张（未找到 ${r.not_found}）`)
+    loadAll() // 统计/列表跟着刷新
+  } catch (e) {
+    toast(e.message, true)
+  }
+  restoring.value = false
+}
+
 async function openFolder() {
   const d = archiveResult.value ? archiveResult.value.dir : (summary.value && summary.value.archive_dir)
   if (!d) return
@@ -400,6 +458,11 @@ onMounted(async () => {
 
 <style scoped>
 .grid { display: flex; flex-direction: column; gap: 14px; width: 100%; }
+.cf-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 110;
+  display: flex; align-items: center; justify-content: center; padding: 24px; }
+.cf-card { background: var(--card); border: 2px solid var(--danger); border-radius: 12px;
+  width: min(680px, 94vw); max-height: 86vh; overflow-y: auto; padding: 16px 18px;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.4); }
 .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .session-sel { max-width: 320px; font-size: 13px; padding: 5px 8px; }
 .bars { display: flex; gap: 26px; align-items: flex-end; padding: 6px 4px; }
