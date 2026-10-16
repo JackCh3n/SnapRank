@@ -616,7 +616,7 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw, recordsOnly bool) (*Gallery
 		return res, nil
 	}
 	recycle := c.snapshotConfig().Gallery.RecycleOnDelete
-	srcDirs := map[string]string{} // sessionID -> 源图目录（回收站建在这里）
+	sessDirs := map[string]string{} // sessionID -> 源目录集合（查一次，可能含 ";" 多目录）
 	for _, id := range ids {
 		p, err := c.st.GetPhoto(id)
 		if err != nil {
@@ -630,14 +630,14 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw, recordsOnly bool) (*Gallery
 		}
 		res.FreedMB += float64(st.Size()) / 1048576
 		if recycle {
-			dir, ok := srcDirs[p.SessionID]
+			base, ok := sessDirs[p.SessionID]
 			if !ok {
-				dir = filepath.Dir(src) // 找不到批次记录时退回照片所在目录
-				if sess, serr := c.st.GetSession(p.SessionID); serr == nil && sess.SourceDir != "" {
-					dir = sess.SourceDir
+				if sess, serr := c.st.GetSession(p.SessionID); serr == nil && sess != nil {
+					base = sess.SourceDir
 				}
-				srcDirs[p.SessionID] = dir
+				sessDirs[p.SessionID] = base
 			}
+			dir := recycleBaseDir(src, base)
 			if _, merr := moveToRecycle(src, dir); merr != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", p.Filename, merr))
 				continue
@@ -674,6 +674,27 @@ func (c *Core) GalleryDelete(ids []int64, deleteRaw, recordsOnly bool) (*Gallery
 }
 
 // moveToRecycle 把文件移入 sessionDir 下的回收站（重名自动追加 (n) 后缀），返回新路径
+// recycleBaseDir 回收站基准目录：取源目录集合中「包含这张照片」的那个根目录
+// （多目录合并批次有多个根，用 ";" 分隔）；都不匹配就退回照片自身所在目录。
+func recycleBaseDir(srcPath, sourceDirs string) string {
+	key := strings.ToLower(strings.ReplaceAll(srcPath, "\\", "/"))
+	best := ""
+	for _, d := range strings.Split(sourceDirs, ";") {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+		pre := strings.ToLower(strings.ReplaceAll(strings.TrimRight(d, "\\/"), "\\", "/")) + "/"
+		if strings.HasPrefix(key, pre) && len(pre) > len(best) {
+			best = d // 取最长匹配根（嵌套目录时更精确）
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return filepath.Dir(srcPath)
+}
+
 func moveToRecycle(src, sessionDir string) (string, error) {
 	dir := filepath.Join(sessionDir, pipeline.RecycleDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
