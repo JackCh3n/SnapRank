@@ -2044,6 +2044,76 @@ type ArchiveSummary struct {
 	Errors    []string       `json:"errors,omitempty"`
 }
 
+// ScoreBucket 分值归档分桶：<6.0 一桶；6.0-6.5 / 6.6-7.0 / 7.1-7.5 各一桶；
+// 7.6 起每 0.1 分一桶（7.6、7.7 … 10.0）
+func ScoreBucket(score float64) string {
+	switch {
+	case score < 6.0:
+		return "6.0以下"
+	case score <= 6.5:
+		return "6.0-6.5"
+	case score <= 7.0:
+		return "6.6-7.0"
+	case score <= 7.5:
+		return "7.1-7.5"
+	default:
+		return fmt.Sprintf("%.1f", score)
+	}
+}
+
+// ScoreArchive 分值归档：把指定照片按分值分桶移动/复制到归档根目录下的分值
+// 文件夹（6.0-6.5、6.6-7.0、7.1-7.5，7.6 起每 0.1 一档）。只处理有分数的照片；
+// 已归档过的跳过。图库「分值归档」按钮用（先删低分再按分值整理的工作流）。
+func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode) (*ArchiveSummary, error) {
+	if e.IsRunning() {
+		return nil, errors.New("任务运行中，请先停止或等待完成")
+	}
+	if !archive.ValidMode(mode) {
+		return nil, fmt.Errorf("非法归档方式: %s", mode)
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("未选择要归档的照片")
+	}
+	cfg := e.cfgFn()
+	root := cfg.Paths.ArchiveRoot
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	sum := &ArchiveSummary{Mode: string(mode), Buckets: map[string]int{}, Dir: root}
+	for _, id := range ids {
+		p, err := e.store.GetPhoto(id)
+		if err != nil || p == nil {
+			sum.Failed++
+			continue
+		}
+		if p.Status != store.StatusScored {
+			continue // 无分数（解析失败/失败等）不参与分值归档
+		}
+		if p.ArchivedPath != "" {
+			sum.Skipped++
+			continue
+		}
+		bucket := ScoreBucket(p.Score)
+		dest, skipped, perr := archive.Place(root, bucket, p.SrcPath, p.Fingerprint, mode)
+		if perr != nil {
+			sum.Failed++
+			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", p.Filename, perr))
+			continue
+		}
+		if skipped {
+			sum.Skipped++
+		} else {
+			sum.Placed++
+		}
+		sum.Buckets[bucket]++
+		e.store.SetPhotoArchived(p.ID, dest)
+	}
+	if sum.Placed == 0 && sum.Skipped == 0 {
+		return nil, errors.New("没有可归档的照片（需要有分数且源文件存在）")
+	}
+	return sum, nil
+}
+
 // Archive 执行阶段二：按确认的方式复制/移动到档位目录并导出报告；sessionID 为空取最近会话
 func (e *Engine) Archive(mode archive.Mode, sessionID string) (*ArchiveSummary, error) {
 	if e.IsRunning() {

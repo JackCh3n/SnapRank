@@ -54,6 +54,8 @@
             @click="rescoreSelected">↻ 重评所选（{{ rescorableCount }}）</button>
           <button class="btn small" :disabled="rescoring" title="选择新模型批量重评：当前筛选/无说明/已选"
             @click="openRescoreAll">↻ 一键重评…</button>
+          <button class="btn small" :disabled="!scoreArchiveCount" title="把当前筛选的照片按分值放入归档目录下的分值文件夹：6.0-6.5 / 6.6-7.0 / 7.1-7.5，7.6 起每 0.1 分一个文件夹"
+            @click="scoreArchiveOpen = true">📁 分值归档（{{ scoreArchiveCount }}）</button>
           <button class="btn danger" :disabled="!selected.size || deleting" @click="confirmOpen = true">
             🗑️ 删除所选（{{ selected.size }}）
           </button>
@@ -145,6 +147,37 @@
     <PhotoModal v-if="preview" :photo="preview" :busy="false" :list="filtered"
       @close="preview = null" @navigate="onNavigate" @deleted="onDeleted" 
       @rescored="load" />
+
+    <!-- 分值归档弹窗：分桶预览 + 复制/移动 -->
+    <div v-if="scoreArchiveOpen" class="cf-mask" @click.self="scoreArchiveOpen = false">
+      <div class="cf-card" style="border-color: var(--accent)">
+        <h3 class="title">📁 分值归档</h3>
+        <div class="muted" style="margin: 6px 0 8px">
+          把当前筛选的 <b>{{ scoreArchiveCount }}</b> 张已评分照片按分值放入
+          <b>{{ archiveRoot || '归档目录' }}</b> 下的分值文件夹：
+        </div>
+        <div class="bucket-list">
+          <div v-for="bk in scoreBuckets" :key="bk[0]" class="row" style="justify-content: space-between; padding: 2px 4px">
+            <span>📁 {{ bk[0] }}</span><span class="muted">{{ bk[1] }} 张</span>
+          </div>
+          <div v-if="!scoreBuckets.length" class="muted">当前筛选没有已评分的照片</div>
+        </div>
+        <div class="muted" style="font-size: 12px; margin-top: 6px">
+          分桶规则：6.0-6.5、6.6-7.0、7.1-7.5 各一个文件夹；7.6 起每 0.1 分一个文件夹（7.6、7.7…10.0）。
+          已归档过的照片自动跳过；同名冲突自动加序号。
+        </div>
+        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
+          <select v-model="scoreArchiveMode" style="width: 130px" title="移动=剪切源文件；复制=保留源文件">
+            <option value="move">移动（剪切）</option>
+            <option value="copy">复制（保留源）</option>
+          </select>
+          <button class="btn plain" @click="scoreArchiveOpen = false">取消</button>
+          <button class="btn" :disabled="scoreArchiving || !scoreArchiveCount" @click="doScoreArchive">
+            {{ scoreArchiving ? '归档中…' : '开始归档' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 一键重评弹窗：选范围 + 新模型 -->
     <div v-if="rescoreAllOpen" class="cf-mask" @click.self="rescoreAllOpen = false">
@@ -338,6 +371,45 @@ const lowCount = computed(() => items.value.filter((p) => p.status === 'scored' 
 const noReasonCount = computed(() => items.value.filter((p) => p.status === 'scored' && !p.weakness).length)
 const selectedItems = computed(() => items.value.filter((p) => selected.value.has(p.id)))
 const confirmOpen = ref(false)
+
+// ---------- 分值归档：当前筛选按分值分桶放入归档目录 ----------
+const scoreArchiveOpen = ref(false)
+const scoreArchiveMode = ref('move')
+const scoreArchiving = ref(false)
+const archiveRoot = computed(() => state.config?.paths?.archive_root || '')
+const scoreArchiveCount = computed(() => filtered.value.filter((p) => p.status === 'scored').length)
+// 分桶口径与后端 ScoreBucket 一致：<6.0 一桶；6.0-6.5 / 6.6-7.0 / 7.1-7.5；7.6 起每 0.1 一桶
+function scoreBucketOf(s) {
+  if (s < 6.0) return '6.0以下'
+  if (s <= 6.5) return '6.0-6.5'
+  if (s <= 7.0) return '6.6-7.0'
+  if (s <= 7.5) return '7.1-7.5'
+  return Number(s).toFixed(1)
+}
+const scoreBuckets = computed(() => {
+  const m = {}
+  for (const p of filtered.value) {
+    if (p.status !== 'scored') continue
+    const b = scoreBucketOf(p.score)
+    m[b] = (m[b] || 0) + 1
+  }
+  const key = (s) => (s.endsWith('以下') ? -1 : parseFloat(s) || 0)
+  return Object.entries(m).sort((a, b) => key(a[0]) - key(b[0]))
+})
+async function doScoreArchive() {
+  const ids = filtered.value.filter((p) => p.status === 'scored').map((p) => p.id)
+  if (!ids.length) return
+  scoreArchiving.value = true
+  try {
+    const r = await api('/api/gallery/score-archive', { method: 'POST', body: JSON.stringify({ ids, mode: scoreArchiveMode.value }) })
+    toast(`分值归档完成：${r.placed} 张${r.skipped ? `（${r.skipped} 张已归档过跳过）` : ''} → ${r.dir}`)
+    scoreArchiveOpen.value = false
+    load()
+  } catch (e) {
+    toast(e.message, true)
+  }
+  scoreArchiving.value = false
+}
 
 function toggleSelect(p) {
   const s = new Set(selected.value)
@@ -646,6 +718,7 @@ html.dark .thumb-wrap { background: #333; }
   width: min(720px, 94vw); max-height: 86vh; display: flex; flex-direction: column;
   padding: 16px 18px; box-shadow: 0 12px 48px rgba(0,0,0,0.4);
 }
+.bucket-list { max-height: 260px; overflow-y: auto; border: 1px dashed var(--line); border-radius: 8px; padding: 6px 8px; margin: 4px 0; }
 .cf-list { overflow-y: auto; flex: 1; margin: 8px 0; }
 .cf-row {
   display: flex; align-items: baseline; gap: 10px; font-size: 13px;

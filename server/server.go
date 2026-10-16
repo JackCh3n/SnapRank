@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"snaprank/internal/archive"
 	"snaprank/internal/core"
 	"snaprank/internal/pipeline"
 	"snaprank/web"
@@ -63,6 +64,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/preset/apply", s.handlePresetApply)
 	s.mux.HandleFunc("POST /api/preset/delete", s.handlePresetDelete)
 	s.mux.HandleFunc("POST /api/gallery/delete", s.handleGalleryDelete)
+	s.mux.HandleFunc("POST /api/gallery/score-archive", s.handleScoreArchive)
 	s.mux.HandleFunc("POST /api/session/rename", s.handleSessionRename)
 	s.mux.HandleFunc("POST /api/session/delete", s.handleSessionDelete)
 	s.mux.HandleFunc("POST /api/clear-all", s.handleClearAll)
@@ -423,6 +425,28 @@ func (s *Server) handleGallery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, items)
+}
+
+// handleScoreArchive 分值归档：按分值分桶移动/复制到归档根目录下的分值文件夹
+func (s *Server) handleScoreArchive(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs  []int64 `json:"ids"`
+		Mode string  `json:"mode"` // move | copy（默认 move）
+	}
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	mode := archive.Mode(req.Mode)
+	if req.Mode == "" {
+		mode = archive.Move
+	}
+	res, err := s.core.Engine().ScoreArchive(req.IDs, mode)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, res)
 }
 
 // handleGalleryDelete 批量删除照片源文件（危险操作；records_only 仅删记录）
