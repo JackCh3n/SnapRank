@@ -41,6 +41,63 @@
       </div>
     </div>
 
+    <!-- 归档确认（两阶段） -->
+    <div class="card" v-if="summary && totalScored > 0">
+      <h3 class="title">确认归档 <span class="muted">（默认复制，移动需显式选择）</span></h3>
+      <div class="row">
+        <label class="field">
+          归档方式
+          <select v-model="mode">
+            <option value="copy">复制（源图不动，推荐）</option>
+            <option value="move">移动（源图移入归档目录）</option>
+          </select>
+        </label>
+        <label class="field">
+          归档根目录
+          <input style="width: 320px" v-model="archiveRoot" />
+        </label>
+        <button class="btn" :disabled="archiving || state.running" @click="doArchive">执行归档</button>
+        <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || summary.archive_dir" @click="openFolder">打开归档目录</button>
+        <button class="btn plain" :disabled="state.running" title="把归档目录里的照片按内容匹配移回各自原始目录（可先选目录）"
+          @click="restoreOpen = true">↩ 还原归档…</button>
+      </div>
+      <div v-if="archiveResult" class="muted" style="margin-top: 8px">
+        ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }} →
+        {{ archiveResult.dir }}
+        <a v-if="archiveResult.report_csv" href="/api/report" download>下载 report.csv</a>
+        <div v-for="(e, i) in archiveResult.errors || []" :key="i" class="error-text">{{ e }}</div>
+      </div>
+      <div class="muted" style="margin-top: 6px">
+        说明：解析失败的照片不会移动，仅记录在报告「29_待复检」；解码失败/不支持的文件留在原目录。
+      </div>
+    </div>
+
+    <!-- 还原归档：按内容把归档目录里的照片移回原始目录 -->
+    <div v-if="restoreOpen" class="cf-mask" @click.self="restoreOpen = false">
+      <div class="cf-card" style="border-color: var(--accent)">
+        <h3 class="title">↩ 还原归档</h3>
+        <div class="muted" style="margin: 6px 0 8px">
+          扫描下面目录里的图片，按<b>内容指纹</b>匹配已归档记录，移回各自原始目录（同名不同内容自动改名，不覆盖）。
+          归档目录被整体搬走过也没关系——指到搬去的地方即可。
+        </div>
+        <div class="row" style="gap: 6px; align-items: center">
+          <input style="flex: 1" v-model="restoreDir" placeholder="还原来源目录（例如 E:\fuji\SnapRank）" @keyup.enter="doRestore" />
+          <button class="btn plain small" :disabled="restoring" @click="pickRestoreDir">选择目录</button>
+        </div>
+        <div v-if="restoreResult" class="muted" style="margin-top: 10px">
+          ✅ 移回 {{ restoreResult.restored }} 张<span v-if="restoreResult.conflict">（其中 {{ restoreResult.conflict }} 张改名放回）</span>
+          · 原目录已有同内容 {{ restoreResult.same }} · 未找到 {{ restoreResult.not_found }} · 失败 {{ restoreResult.failed }}
+          <div v-for="(e, i) in restoreResult.errors || []" :key="i" class="error-text">{{ e }}</div>
+        </div>
+        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
+          <button class="btn plain" @click="restoreOpen = false">关闭</button>
+          <button class="btn" :disabled="restoring || !restoreDir.trim()" @click="doRestore">
+            {{ restoring ? '还原中…（大目录要算指纹，请稍候）' : '开始还原' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 照片网格 -->
     <div class="card" v-if="photos.length">
       <h3 class="title">评分复核 <span class="muted">（可在下拉中手动调档）</span>
@@ -99,63 +156,6 @@
           <button class="btn plain small" :disabled="page >= totalPages" @click="goPage(page + 1)">下一页 ›</button>
           <button class="btn plain small" :disabled="page >= totalPages" @click="goPage(totalPages)">尾页 »</button>
         </span>
-      </div>
-    </div>
-
-    <!-- 归档确认（两阶段） -->
-    <div class="card" v-if="summary && totalScored > 0">
-      <h3 class="title">确认归档 <span class="muted">（默认复制，移动需显式选择）</span></h3>
-      <div class="row">
-        <label class="field">
-          归档方式
-          <select v-model="mode">
-            <option value="copy">复制（源图不动，推荐）</option>
-            <option value="move">移动（源图移入归档目录）</option>
-          </select>
-        </label>
-        <label class="field">
-          归档根目录
-          <input style="width: 320px" v-model="archiveRoot" />
-        </label>
-        <button class="btn" :disabled="archiving || state.running" @click="doArchive">执行归档</button>
-        <button class="btn plain" v-if="(archiveResult && archiveResult.dir) || summary.archive_dir" @click="openFolder">打开归档目录</button>
-        <button class="btn plain" :disabled="state.running" title="把归档目录里的照片按内容匹配移回各自原始目录（可先选目录）"
-          @click="restoreOpen = true">↩ 还原归档…</button>
-      </div>
-      <div v-if="archiveResult" class="muted" style="margin-top: 8px">
-        ✅ 放置 {{ archiveResult.placed }} · 跳过 {{ archiveResult.skipped }} · 失败 {{ archiveResult.failed }} →
-        {{ archiveResult.dir }}
-        <a v-if="archiveResult.report_csv" href="/api/report" download>下载 report.csv</a>
-        <div v-for="(e, i) in archiveResult.errors || []" :key="i" class="error-text">{{ e }}</div>
-      </div>
-      <div class="muted" style="margin-top: 6px">
-        说明：解析失败的照片不会移动，仅记录在报告「29_待复检」；解码失败/不支持的文件留在原目录。
-      </div>
-    </div>
-
-    <!-- 还原归档：按内容把归档目录里的照片移回原始目录 -->
-    <div v-if="restoreOpen" class="cf-mask" @click.self="restoreOpen = false">
-      <div class="cf-card" style="border-color: var(--accent)">
-        <h3 class="title">↩ 还原归档</h3>
-        <div class="muted" style="margin: 6px 0 8px">
-          扫描下面目录里的图片，按<b>内容指纹</b>匹配已归档记录，移回各自原始目录（同名不同内容自动改名，不覆盖）。
-          归档目录被整体搬走过也没关系——指到搬去的地方即可。
-        </div>
-        <div class="row" style="gap: 6px; align-items: center">
-          <input style="flex: 1" v-model="restoreDir" placeholder="还原来源目录（例如 E:\fuji\SnapRank）" @keyup.enter="doRestore" />
-          <button class="btn plain small" :disabled="restoring" @click="pickRestoreDir">选择目录</button>
-        </div>
-        <div v-if="restoreResult" class="muted" style="margin-top: 10px">
-          ✅ 移回 {{ restoreResult.restored }} 张<span v-if="restoreResult.conflict">（其中 {{ restoreResult.conflict }} 张改名放回）</span>
-          · 原目录已有同内容 {{ restoreResult.same }} · 未找到 {{ restoreResult.not_found }} · 失败 {{ restoreResult.failed }}
-          <div v-for="(e, i) in restoreResult.errors || []" :key="i" class="error-text">{{ e }}</div>
-        </div>
-        <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
-          <button class="btn plain" @click="restoreOpen = false">关闭</button>
-          <button class="btn" :disabled="restoring || !restoreDir.trim()" @click="doRestore">
-            {{ restoring ? '还原中…（大目录要算指纹，请稍候）' : '开始还原' }}
-          </button>
-        </div>
       </div>
     </div>
 
