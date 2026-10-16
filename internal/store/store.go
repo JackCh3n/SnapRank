@@ -513,24 +513,36 @@ func (s *Store) LastSession() (*Session, error) {
 
 // ---------- photo ----------
 
-// UpsertPhoto 按 (session_id, src_path) 插入或更新照片基础信息，返回自增 ID
+// UpsertPhoto 按 (session_id, src_path) 插入或更新照片基础信息，返回行 ID。
+// 不能用 LastInsertId：modernc/sqlite 在 ON CONFLICT DO UPDATE（续跑/并入的冲突
+// 更新路径）返回的是陈旧值——上次任意 INSERT 的 rowid，实测会张冠李戴（返回别的
+// 表/别的行的 ID），必须按唯一键回查真实 ID。
 func (s *Store) UpsertPhoto(p *Photo) (int64, error) {
 	p.UpdatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO photos(session_id, fingerprint, src_path, filename, rel_path, size, status, updated_at)
+	if _, err := s.db.Exec(`INSERT INTO photos(session_id, fingerprint, src_path, filename, rel_path, size, status, updated_at)
 		VALUES(?,?,?,?,?,?,?,?)
 		ON CONFLICT(session_id, src_path) DO UPDATE SET
 		  fingerprint=excluded.fingerprint, size=excluded.size, updated_at=excluded.updated_at`,
-		p.SessionID, p.Fingerprint, p.SrcPath, p.Filename, p.RelPath, p.Size, p.Status, p.UpdatedAt)
-	if err != nil {
+		p.SessionID, p.Fingerprint, p.SrcPath, p.Filename, p.RelPath, p.Size, p.Status, p.UpdatedAt); err != nil {
 		return 0, err
 	}
-	if id, err := res.LastInsertId(); err == nil && id > 0 {
-		return id, nil
-	}
-	// ON CONFLICT 更新路径下取回既有 ID
 	var id int64
-	err = s.db.QueryRow(`SELECT id FROM photos WHERE session_id=? AND src_path=?`, p.SessionID, p.SrcPath).Scan(&id)
+	err := s.db.QueryRow(`SELECT id FROM photos WHERE session_id=? AND src_path=?`, p.SessionID, p.SrcPath).Scan(&id)
 	return id, err
+}
+
+// PhotoFingerprintByPath 取会话内该路径既有照片的指纹（内容变更检测用）。
+// 必须在 UpsertPhoto 之前调用——Upsert 会把指纹覆盖成新值，之后再取就检测不到变更。
+// existed=false 表示库中尚无该照片。
+func (s *Store) PhotoFingerprintByPath(sessionID, srcPath string) (fp string, existed bool, err error) {
+	row := s.db.QueryRow(`SELECT fingerprint FROM photos WHERE session_id=? AND src_path=?`, sessionID, srcPath)
+	if e := row.Scan(&fp); e != nil {
+		if errors.Is(e, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, e
+	}
+	return fp, true, nil
 }
 
 // CountPhotos 会话照片总数（后台扫描复核成本上限用）
@@ -718,7 +730,7 @@ func (s *Store) CountArchivedPhotos() (int, error) {
 // 多模型下主模型失败曾覆盖其它模型的成功结果，启动时按新口径（任一模型成功即算
 // 评完）修复这批历史数据。
 func (s *Store) FailedPhotosWithScores() ([]*Photo, error) {
-	rows, err := s.db.Query(`SELECT ` + photoCols + ` FROM photos p
+	rows, err := s.db.Query(`SELECT `+photoCols+` FROM photos p
 		WHERE p.status IN (?,?)
 		  AND EXISTS (SELECT 1 FROM photo_scores ps WHERE ps.photo_id = p.id AND ps.dims IS NOT NULL AND ps.dims != '')
 		ORDER BY p.id`, StatusParseFail, StatusFailed)
@@ -1073,7 +1085,6 @@ func (s *Store) ScoredPhotosAll() ([]*Photo, error) {
 	}
 	return list, rows.Err()
 }
-
 
 // FailedPhotos 会话内失败类明细（bad_image/unsupported/failed/duplicate）
 func (s *Store) FailedPhotos(sessionID string) ([]*Photo, error) {

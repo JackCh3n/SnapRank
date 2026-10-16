@@ -536,9 +536,9 @@ func (c *Core) CleanWorkCache() (int64, error) {
 // GalleryItem 图库条目（跨批次按源文件去重）
 type GalleryItem struct {
 	*store.Photo
-	Present     bool     `json:"present"`                  // 源文件是否还在
-	Favorite    bool     `json:"favorite,omitempty"`       // 已标记「喜欢」（按指纹，低分筛选会跳过）
-	RawSiblings []string `json:"raw_siblings,omitempty"`   // 同名 RAW/HEIC 伴生文件
+	Present     bool     `json:"present"`                // 源文件是否还在
+	Favorite    bool     `json:"favorite,omitempty"`     // 已标记「喜欢」（按指纹，低分筛选会跳过）
+	RawSiblings []string `json:"raw_siblings,omitempty"` // 同名 RAW/HEIC 伴生文件
 }
 
 var rawSiblingExts = archive.RawSiblingExts // 同名伴生文件扩展名（与归档共用同一份）
@@ -606,14 +606,14 @@ func (c *Core) SetImportDir(dir string) error {
 
 // GalleryDeleteResult 批量删除结果
 type GalleryDeleteResult struct {
-	Deleted   int      `json:"deleted"`             // 直接删除的照片源文件数
-	Raws      int      `json:"raws"`                // 联动处理的 RAW/伴生文件数
-	FreedMB   float64  `json:"freed_mb"`            // 释放/移出空间
-	Missing   int      `json:"missing"`             // 源文件已不存在的
-	Recycled  int      `json:"recycled"`            // 移入回收站的照片源文件数
-	RecycleDir string  `json:"recycle_dir,omitempty"` // 回收站目录（前端打开用）
-	RemovedRecords int `json:"removed_records"`    // 仅移除记录的照片数
-	Errors    []string `json:"errors,omitempty"`
+	Deleted        int      `json:"deleted"`               // 直接删除的照片源文件数
+	Raws           int      `json:"raws"`                  // 联动处理的 RAW/伴生文件数
+	FreedMB        float64  `json:"freed_mb"`              // 释放/移出空间
+	Missing        int      `json:"missing"`               // 源文件已不存在的
+	Recycled       int      `json:"recycled"`              // 移入回收站的照片源文件数
+	RecycleDir     string   `json:"recycle_dir,omitempty"` // 回收站目录（前端打开用）
+	RemovedRecords int      `json:"removed_records"`       // 仅移除记录的照片数
+	Errors         []string `json:"errors,omitempty"`
 }
 
 // GalleryDelete 批量处理所选照片：

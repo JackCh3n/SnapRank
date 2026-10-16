@@ -5,7 +5,6 @@ package compress
 
 import (
 	"fmt"
-	"time"
 	"image"
 	"image/color"
 	"image/draw"
@@ -14,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/disintegration/imaging"
 	_ "golang.org/x/image/bmp"

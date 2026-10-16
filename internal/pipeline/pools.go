@@ -245,13 +245,15 @@ type runPools struct {
 	work         *workQueue // 压缩投料队列（运行中可追加新目录的照片）
 	planned      int64
 	primaryLabel string
-	closed       bool             // 收尾中/已收尾：拒绝再追加池
+	closed       bool                  // 收尾中/已收尾：拒绝再追加池
 	spawn        func(*modelPool) bool // 由 streamPools 注入；false=任务已收尾
 	compress     compressState
 }
 
 // AddPhotosToRunning 把新目录的照片并入运行中的批次（压缩池接着压、各模型池接着评）。
 // 已压缩过的走内容寻址缓存直接命中，不重新压缩。
+// 「查 closed + 入队」在同一个 rp.mu 临界区内完成：与收尾判定（同持 rp.mu 复查队列
+// 并置 closed）互斥，否则收尾窗口内并入的照片会入队成功却无人消费（静默漏张）。
 func (e *Engine) AddPhotosToRunning(photos []*store.Photo) error {
 	rp := e.pools.Load()
 	if rp == nil {
@@ -265,14 +267,12 @@ func (e *Engine) AddPhotosToRunning(photos []*store.Photo) error {
 		rp.mu.Unlock()
 		return fmt.Errorf("任务正在收尾，无法并入新目录")
 	}
-	rp.mu.Unlock()
 	added := rp.work.push(photos...)
+	rp.planned += int64(added)
+	rp.mu.Unlock()
 	if added == 0 {
 		return nil // 都已在队列里（重复提交同一目录）
 	}
-	rp.mu.Lock()
-	rp.planned += int64(added)
-	rp.mu.Unlock()
 	rp.compress.total.Add(int64(added))
 	logutil.Info("并入当前批次 %d 张（模型池接着评，压缩缓存复用）", added)
 	e.publishPools()

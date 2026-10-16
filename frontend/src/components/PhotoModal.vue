@@ -303,6 +303,7 @@ async function deleteScore(h, i) {
     const r = await api('/api/photo/score/delete', { method: 'POST', body: JSON.stringify({ id: h.id }) })
     toast(`已删除记录${r.avg_score ? `，合议分已重算为 ${r.avg_score.toFixed(1)}` : ''}`)
     if (viewIdx.value === i) viewIdx.value = -1
+    else if (viewIdx.value > i) viewIdx.value -= 1 // 删的是更早的记录：后面的序号整体前移一位
     await loadHistory()
     // 同步照片本体（分数/状态）并通知父组件刷新列表
     if (p.value && p.value.id) {
@@ -366,8 +367,9 @@ async function startRescore() {
   rescoreResult.value = null
   rescorePhase.value = '提交复检请求…'
   rescorePct.value = 8
+  let rr = null // 提到 try 外：下面的 SSE 监听器也要用（块内声明会 ReferenceError 被静默吞掉）
   try {
-    const rr = await rescorePhotos({
+    rr = await rescorePhotos({
       ids: [p.value.id],
       force: true,
     })
@@ -379,13 +381,13 @@ async function startRescore() {
   }
   rescorePhase.value = '等待 AI 重新评分…'
   startFakeProgress()
-  // SSE 跟踪这张照片的重评进度（progress 事件按文件名匹配）
+  // SSE 跟踪这张照片的重评进度（按文件名 + 复检批次匹配，避免同名照片串台）
   rescoreEs = new EventSource('/api/events')
   const name = p.value.filename
   rescoreEs.addEventListener('progress', (e) => {
     try {
       const d = JSON.parse(e.data)
-      if (d.file !== name || d.session_id !== d.session_id) return
+      if (d.file !== name || (rr && rr.session_id && d.session_id !== rr.session_id)) return
       if (d.status === 'scored') {
         rescorePct.value = 100
         rescorePhase.value = '完成'

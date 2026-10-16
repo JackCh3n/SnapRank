@@ -272,7 +272,6 @@ var volcanoCodingPlanModels = []string{
 	"glm-5.3-flash",
 }
 
-
 // ListModels 拉取模型清单（Anthropic /v1/models）
 func (a *AnthropicProvider) ListModels(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -426,7 +425,9 @@ func (m *Mock) ListModels(ctx context.Context) ([]string, error) {
 func (m *Mock) Score(ctx context.Context, model string, req ScoreRequest) (string, error) {
 	start := time.Now()
 	logutil.Info("[评分] %s 开始（mock）", model)
-	defer func() { logutil.Info("[评分] %s 完成，耗时 %dms（mock）", model, time.Since(start).Milliseconds()) }()
+	defer func() {
+		logutil.Info("[评分] %s 完成，耗时 %dms（mock）", model, time.Since(start).Milliseconds())
+	}()
 	if strings.Contains(strings.ToUpper(req.Filename), "BADJSON") {
 		return `哎呀，这张照片感觉 {一般吧}`, nil
 	}

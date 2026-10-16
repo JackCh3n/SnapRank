@@ -117,15 +117,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	eng := s.core.Engine()
 	sum, _ := s.core.Summary(r.URL.Query().Get("session"))
 	writeJSON(w, 200, map[string]interface{}{
-		"config":       s.core.GetConfig(),
-		"currentModel": s.core.GetCurrentModel(),
-		"running":      eng.IsRunning(),
-		"session":      eng.CurrentSession(),
-		"queue":        eng.QueueStatus(),
-		"pools":        eng.PoolsState(), // 压缩池 + 各模型池状态（前端面板）
-		"summary":      sum,
+		"config":         s.core.GetConfig(),
+		"currentModel":   s.core.GetCurrentModel(),
+		"running":        eng.IsRunning(),
+		"session":        eng.CurrentSession(),
+		"queue":          eng.QueueStatus(),
+		"pools":          eng.PoolsState(), // 压缩池 + 各模型池状态（前端面板）
+		"summary":        sum,
 		"archived_count": s.core.ArchivedCount(), // 已归档照片数（源文件已移出，可还原）
-		"version":      Version,
+		"version":        Version,
 	})
 }
 
