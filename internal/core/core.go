@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"snaprank/internal/archive"
+	"snaprank/internal/compress"
 	"snaprank/internal/config"
 	"snaprank/internal/logutil"
 	"snaprank/internal/pipeline"
@@ -63,6 +64,8 @@ func New(dataDir string) (*Core, error) {
 	if n, err := st.MarkStaleRunningAsStopped(); err == nil && n > 0 {
 		logutil.Info("已将 %d 个中断遗留会话标记为已停止", n)
 	}
+	// 修复历史数据：有成功评分记录却标为失败的照片（多模型下主模型失败覆盖成功结果）
+	c.eng.RepairFailedWithScores()
 	return c, nil
 }
 
@@ -381,28 +384,48 @@ type Thumb struct {
 	Path    string `json:"path,omitempty"`
 }
 
-// ThumbForPhoto 供 serve 直接读文件返回，desktop 转 dataURI
+// thumbFile 预览图取用链：本记录压缩图 → 内容寻址压缩缓存（跨批次共享，
+// 缓存命中的照片也能预览）→ 源图本身（从未压缩过时兜底）。返回实际可读路径。
+func (c *Core) thumbFile(p *store.Photo) (string, error) {
+	if p.CompressedPath != "" {
+		if _, err := os.Stat(p.CompressedPath); err == nil {
+			return p.CompressedPath, nil
+		}
+	}
+	if p.Fingerprint != "" {
+		cp := filepath.Join(c.snapshotConfig().Paths.DataDir, "work", "compressed", compress.CacheName(p.Fingerprint))
+		if _, err := os.Stat(cp); err == nil {
+			return cp, nil
+		}
+	}
+	if p.SrcPath != "" {
+		if _, err := os.Stat(p.SrcPath); err == nil {
+			return p.SrcPath, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+// ThumbPath 预览图路径（见 thumbFile 取用链）
 func (c *Core) ThumbPath(id int64) (string, error) {
 	p, err := c.st.GetPhoto(id)
 	if err != nil {
 		return "", err
 	}
-	if p.CompressedPath == "" {
-		return "", os.ErrNotExist
-	}
-	return p.CompressedPath, nil
+	return c.thumbFile(p)
 }
 
-// ThumbDataURI 桌面壳用：压缩图转 data URI
+// ThumbDataURI 桌面壳用：预览图转 data URI
 func (c *Core) ThumbDataURI(id int64) (string, error) {
 	p, err := c.st.GetPhoto(id)
 	if err != nil {
 		return "", err
 	}
-	if p.CompressedPath == "" {
-		return "", os.ErrNotExist
+	path, err := c.thumbFile(p)
+	if err != nil {
+		return "", err
 	}
-	data, err := os.ReadFile(p.CompressedPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}

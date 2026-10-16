@@ -840,6 +840,46 @@ func (e *Engine) sessionDirsJoined(sessID string, add []string) string {
 	return strings.Join(all, ";")
 }
 
+// RepairFailedWithScores 修复历史数据：状态是失败/解析失败、但确有成功评分记录的
+// 照片（多模型下主模型失败曾覆盖其它模型的成功结果）。按新口径——任一模型评成功即
+// 算评完——改为已评分，分数取该指纹下各模型最新记录的合议平均。启动时跑一次。
+func (e *Engine) RepairFailedWithScores() int {
+	list, err := e.store.FailedPhotosWithScores()
+	if err != nil || len(list) == 0 {
+		return 0
+	}
+	n := 0
+	for _, p := range list {
+		recs, err := e.store.PhotoScoresByFingerprint(p.Fingerprint)
+		if err != nil {
+			continue
+		}
+		var best *store.PhotoModelScore
+		for _, r := range recs {
+			if r.Dims != nil {
+				best = r
+				break
+			}
+		}
+		if best == nil {
+			continue
+		}
+		score := e.RecomputeAggregate(p.Fingerprint)
+		if score <= 0 {
+			score = scorer.WeightedScore(*best.Dims, e.cfgFn().WeightsNormalized())
+		}
+		if err := e.store.SetPhotoResult(p.ID, store.StatusScored, score, best.Dims, best.Tags, best.Strength, best.Weakness, best.Model, best.PromptVersion, best.Source, false, 0); err != nil {
+			continue
+		}
+		e.store.SetPhotoStatus(p.ID, store.StatusScored, "")
+		n++
+	}
+	if n > 0 {
+		logutil.Info("已修复 %d 张「有评分记录却标为失败」的照片（多模型下主模型失败覆盖成功结果）", n)
+	}
+	return n
+}
+
 // enqueue 任务入队；空闲则立即启动
 func (e *Engine) enqueue(sessID string, opts StartOpts, model string) {
 	e.mu.Lock()
@@ -1492,10 +1532,13 @@ func (e *Engine) streamPools(ctx context.Context, rp *runPools, eng *compress.En
 		p := st.p
 		idx := doneCount.Add(1)
 		cfg := e.cfgFn()
+		// 取用顺序：主池成功 → 其它池成功 → 主池失败 → 其它池失败。
+		// 只要有一个模型评成功，就用它（多专家合议：个别专家失败/片面不影响整体），
+		// 正式分再由 RecomputeAggregate 覆盖为各模型平均。
 		var primary modelOutcome
 		label := ""
 		ok := false
-		if o, has := st.outcomes[rp.primaryLabel]; has {
+		if o, has := st.outcomes[rp.primaryLabel]; has && o.status == store.StatusScored {
 			primary, label, ok = o, rp.primaryLabel, true
 		}
 		if !ok {
@@ -1504,8 +1547,16 @@ func (e *Engine) streamPools(ctx context.Context, rp *runPools, eng *compress.En
 					primary, label, ok = o, l, true
 					break
 				}
-				if !ok {
+			}
+		}
+		if !ok {
+			if o, has := st.outcomes[rp.primaryLabel]; has {
+				primary, label, ok = o, rp.primaryLabel, true
+			}
+			if !ok {
+				for l, o := range st.outcomes {
 					primary, label, ok = o, l, true
+					break
 				}
 			}
 		}

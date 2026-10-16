@@ -689,7 +689,30 @@ func (s *Store) GetPhotoModelScores(photoID int64) ([]*PhotoModelScore, error) {
 	return list, rows.Err()
 }
 
-// PhotoScoresByFingerprint 按内容指纹查全部评分记录（合议平均计算用）
+// FailedPhotosWithScores 状态是失败/解析失败、但有成功评分记录（含维度分）的照片。
+// 多模型下主模型失败曾覆盖其它模型的成功结果，启动时按新口径（任一模型成功即算
+// 评完）修复这批历史数据。
+func (s *Store) FailedPhotosWithScores() ([]*Photo, error) {
+	rows, err := s.db.Query(`SELECT ` + photoCols + ` FROM photos p
+		WHERE p.status IN (?,?)
+		  AND EXISTS (SELECT 1 FROM photo_scores ps WHERE ps.photo_id = p.id AND ps.dims IS NOT NULL AND ps.dims != '')
+		ORDER BY p.id`, StatusParseFail, StatusFailed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []*Photo
+	for rows.Next() {
+		p, err := scanPhoto(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, p)
+	}
+	return list, rows.Err()
+}
+
+// PhotoScoresByFingerprint 某内容指纹的全部评分记录（新→旧）
 func (s *Store) PhotoScoresByFingerprint(fingerprint string) ([]*PhotoModelScore, error) {
 	rows, err := s.db.Query(`SELECT ps.id, ps.model, ps.prompt_version, ps.score, ps.dims, ps.tags, ps.strength, ps.weakness, ps.source, ps.created_at
 		FROM photo_scores ps JOIN photos p ON p.id = ps.photo_id
