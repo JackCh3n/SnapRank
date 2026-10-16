@@ -454,13 +454,37 @@ function wrapText(ctx, text, maxWidth) {
   return lines
 }
 
-async function buildShareCard(photo) {
+// 分享卡片：先平均分（+四维条），再按模型逐个列出「评分 + 说明」
+// records = 该照片的评分历史（新→旧）；每个模型只取最新一条（与合议口径一致）
+async function buildShareCard(photo, records) {
   const img = await loadImg(`/api/thumb?id=${photo.id}&v=${(photo.fingerprint || '').slice(0, 12)}`)
   const W = 900, pad = 28
   const imgH = Math.round(W * (img.naturalHeight / img.naturalWidth))
+
+  const latest = []
+  const seen = new Set()
+  for (const h of records || []) {
+    const m = h.model || '未标注模型'
+    if (seen.has(m)) continue
+    seen.add(m)
+    latest.push(h)
+  }
+
   const canvas = document.createElement('canvas')
   canvas.width = W + pad * 2
-  canvas.height = pad * 2 + 34 + imgH + 230
+  const probe = canvas.getContext('2d')
+  const FONT_SMALL = '14px "PingFang SC", "Microsoft YaHei", sans-serif'
+  const reasonLines = (txt) => {
+    if (!txt) return []
+    probe.font = FONT_SMALL
+    return wrapText(probe, txt, W - 60).slice(0, 2) // 每个说明最多两行，卡片不至于过长
+  }
+  const rows = latest.map((h) => ({ h, s: reasonLines(h.strength), w: reasonLines(h.weakness) }))
+  let bodyH = 0
+  for (const r of rows) bodyH += 30 + (r.s.length + r.w.length) * 21 + 10
+  const tagsH = photo.tags && photo.tags.length ? 26 : 0
+  const headH = pad * 2 + 34 + imgH
+  canvas.height = headH + 92 + 18 + bodyH + tagsH + 14
   const ctx = canvas.getContext('2d')
 
   ctx.fillStyle = '#101418'
@@ -469,12 +493,6 @@ async function buildShareCard(photo) {
   ctx.lineWidth = 3
   roundRect(ctx, 8, 8, canvas.width - 16, canvas.height - 16, 18)
   ctx.stroke()
-
-  ctx.save()
-  roundRect(ctx, pad, pad + 34, W, imgH, 12)
-  ctx.clip()
-  ctx.drawImage(img, pad, pad + 34, W, imgH)
-  ctx.restore()
 
   ctx.fillStyle = '#07c160'
   ctx.font = 'bold 22px "PingFang SC", "Microsoft YaHei", sans-serif'
@@ -486,13 +504,20 @@ async function buildShareCard(photo) {
   ctx.fillText('AI 摄影评分', pad + W, pad + 16)
   ctx.textAlign = 'left'
 
+  ctx.save()
+  roundRect(ctx, pad, pad + 34, W, imgH, 12)
+  ctx.clip()
+  ctx.drawImage(img, pad, pad + 34, W, imgH)
+  ctx.restore()
+
+  // 平均分（各模型评分的平均，即照片正式分）
   let y = pad + 34 + imgH + 30
   ctx.fillStyle = '#ffffff'
   ctx.font = 'bold 46px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText(photo.score.toFixed(1), pad, y + 20)
+  ctx.fillText((photo.score || 0).toFixed(1), pad, y + 20)
   ctx.fillStyle = 'rgba(255,255,255,0.5)'
   ctx.font = '15px "PingFang SC", "Microsoft YaHei", sans-serif'
-  ctx.fillText('总分 / 10', pad + 86, y + 26)
+  ctx.fillText('平均分 / 10', pad + 86, y + 26)
 
   const dims = [
     ['技术', photo.dims && photo.dims.technique, '#07c160'],
@@ -518,21 +543,46 @@ async function buildShareCard(photo) {
     ctx.fillText((d[1] || 0).toFixed(1), x + 40 + barW + 10, yy)
   })
 
+  // 分隔线 → 各模型评分与说明
   y += 92
-  ctx.font = '15px "PingFang SC", "Microsoft YaHei", sans-serif'
-  if (photo.strength) {
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(pad, y - 18)
+  ctx.lineTo(pad + W, y - 18)
+  ctx.stroke()
+
+  rows.forEach((r, idx) => {
+    const h = r.h
+    ctx.fillStyle = 'rgba(255,255,255,0.55)'
+    ctx.font = '13px "PingFang SC", "Microsoft YaHei", sans-serif'
+    ctx.fillText(`模型 ${idx + 1}`, pad, y)
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 16px "PingFang SC", "Microsoft YaHei", sans-serif'
+    ctx.fillText(h.model || '未标注模型', pad + 58, y)
+    ctx.textAlign = 'right'
     ctx.fillStyle = '#07c160'
-    ctx.fillText('✓ ' + wrapText(ctx, photo.strength, W - 20)[0], pad, y)
-    y += 24
-  }
-  if (photo.weakness) {
-    ctx.fillStyle = '#e8a23a'
-    ctx.fillText('! ' + wrapText(ctx, photo.weakness, W - 20)[0], pad, y)
-    y += 24
-  }
+    ctx.font = 'bold 20px "PingFang SC", "Microsoft YaHei", sans-serif'
+    ctx.fillText((h.score || 0).toFixed(1), pad + W, y)
+    ctx.textAlign = 'left'
+    y += 30
+    const reasons = [['✓', r.s, '#07c160'], ['!', r.w, '#e8a23a']]
+    for (const [mark, lines, color] of reasons) {
+      if (!lines.length) continue
+      ctx.fillStyle = color
+      ctx.font = FONT_SMALL
+      ctx.fillText(mark, pad + 4, y)
+      ctx.fillStyle = 'rgba(255,255,255,0.78)'
+      lines.forEach((ln, i) => ctx.fillText(ln, pad + 24, y + i * 21))
+      y += lines.length * 21
+    }
+    y += 10
+  })
+
   if (photo.tags && photo.tags.length) {
     ctx.fillStyle = 'rgba(255,255,255,0.55)'
-    ctx.fillText(photo.tags.slice(0, 4).map(t => '#' + t).join('  '), pad, Math.min(y + 4, canvas.height - pad - 14))
+    ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif'
+    ctx.fillText(photo.tags.slice(0, 6).map(t => '#' + t).join('  '), pad, y + 4)
   }
   return canvas
 }
@@ -542,7 +592,7 @@ async function copyShareCard() {
   sharing.value = true
   copyHint.value = '生成中…'
   try {
-    const canvas = await buildShareCard(disp.value)
+    const canvas = await buildShareCard(p.value, history.value)
     shareUrl.value = canvas.toDataURL('image/png')
     let copied = false
     if (navigator.clipboard && window.ClipboardItem) {
