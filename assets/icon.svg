@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 帧选 SnapRank 应用图标：暗底圆角 + 品牌绿描边 + 照片卡片（山/日）+ 评分星徽章 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a222b"/>
+      <stop offset="1" stop-color="#0b0f14"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6eae8"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3ecf82"/>
+      <stop offset="1" stop-color="#0d9e57"/>
+    </linearGradient>
+    <clipPath id="card">
+      <rect x="108" y="92" width="296" height="296" rx="38"/>
+    </clipPath>
+  </defs>
+
+  <!-- 背景：暗色圆角方块 + 品牌绿描边（呼应分享卡片） -->
+  <rect x="18" y="18" width="476" height="476" rx="110" fill="url(#bg)"/>
+  <rect x="30" y="30" width="452" height="452" rx="100" fill="none" stroke="#07c160" stroke-width="18"/>
+
+  <!-- 照片卡片 -->
+  <g clip-path="url(#card)">
+    <rect x="108" y="92" width="296" height="296" fill="url(#paper)"/>
+    <rect x="108" y="92" width="296" height="212" fill="url(#sky)"/>
+    <!-- 太阳 -->
+    <circle cx="330" cy="168" r="34" fill="#ffd75e"/>
+    <!-- 远山（深绿） -->
+    <path d="M108 304 L188 216 L268 304 Z" fill="#0b7a45"/>
+    <!-- 近山（墨绿） -->
+    <path d="M196 304 L292 196 L388 304 Z" fill="#065c34"/>
+    <!-- 前景草地 -->
+    <rect x="108" y="296" width="296" height="92" fill="#0a4d2e"/>
+  </g>
+  <!-- 卡片描边（与暗底分隔） -->
+  <rect x="108" y="92" width="296" height="296" rx="38" fill="none" stroke="#0b0f14" stroke-width="10"/>
+
+  <!-- 评分徽章：品牌绿圆 + 白色五角星 -->
+  <circle cx="382" cy="382" r="92" fill="#07c160" stroke="#0b0f14" stroke-width="14"/>
+  <polygon fill="#ffffff" points="382,330 394.3,365.0 431.5,365.9 402.0,388.5 412.6,424.1 382,403.0 351.4,424.1 362.0,388.5 332.5,365.9 369.7,365.0"/>
+</svg>

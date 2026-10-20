@@ -93,6 +93,9 @@ func openShellWindow(url string) {
 			Width:  1280,
 			Height: 820,
 			Center: true,
+			// 窗口/任务栏图标：go-winres 嵌进 exe 资源的 RT_GROUP_ICON（ID=1，
+			// 库内 LoadImageW(hinstance, MAKEINTRESOURCE(1), IMAGE_ICON) 加载）
+			IconId: 1,
 		},
 	})
 	if w == nil {
