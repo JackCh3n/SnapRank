@@ -1185,7 +1185,10 @@ func (e *Engine) Rescore(ids []int64, o RescoreOpts) (string, error) {
 	}
 	first := ""
 	for _, g := range groups {
-		e.enqueue(g.sessID, StartOpts{Dir: g.dir, Models: extras, CrossModels: cross}, model)
+		// Models 传完整清单（含主模型，与运行页口径一致）：run() 的 multiModel
+		// 判定按 len(opts.Models)>1 数完整清单——只传 extras 会让「主模型+恰 1 个
+		// 对比模型」被误判成单模型，缓存捷径吃掉照片后对比模型永远不评
+		e.enqueue(g.sessID, StartOpts{Dir: g.dir, Models: append([]string{model}, extras...), CrossModels: cross}, model)
 		if first == "" {
 			first = g.sessID
 		}
