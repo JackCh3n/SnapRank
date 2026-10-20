@@ -1102,16 +1102,42 @@ func (e *Engine) resetIfChanged(id int64, oldFP string) {
 	}
 }
 
+// RescoreOpts 复检重评选项
+type RescoreOpts struct {
+	ForceCost   bool         // 忽略跨会话评分缓存强制重调 API
+	Models      []string     // 同平台模型清单（首个=主模型，其余并行对比；空=配置默认单模型）
+	CrossModels []CrossModel // 跨平台预设+模型（与主模型并行评同一张）
+}
+
 // Rescore 复检重评：把指定照片重置为待处理并立即重跑（走当前所选模型），
-// 已有压缩缓存命中即跳过压缩，0 重复压缩；forceCost=true 时忽略跨会话评分缓存强制重调 API。
-// 支持跨批次：按照片所属批次分组逐批入队（图库勾选重评依赖此行为），批次间顺序执行。
-func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
+// 已有压缩缓存命中即跳过压缩，0 重复压缩；ForceCost=true 时忽略跨会话评分缓存
+// 强制重调 API（所选的每个目标模型的旧缓存都清除）。支持多模型对比：Models
+// 首个为主模型（入照片正记录），其余各自并行评分并写入评分历史，合议平均分
+// 自动重算。支持跨批次：按照片所属批次分组逐批入队（图库勾选重评依赖此行为），
+// 批次间顺序执行。
+func (e *Engine) Rescore(ids []int64, o RescoreOpts) (string, error) {
 	if len(ids) == 0 {
 		return "", errors.New("未选择要重评的照片")
 	}
 	cfg := e.cfgFn()
 	if cfg.Provider.Type != "mock" && cfg.Provider.APIKey == "" {
 		return "", errors.New("尚未配置 API Key（或切换到 mock 模式体验）")
+	}
+	// 主模型：显式指定优先（首个），其余同平台模型并行对比；空清单回退配置默认
+	model, extras := pickMainAndExtras(o.Models, cfg.Model.Default)
+	// 跨平台对比模型：去重 + 预设可用性提前校验（坏预设直接报错，不等到逐张跳过）
+	seenCross := map[string]bool{}
+	var cross []CrossModel
+	for _, cm := range o.CrossModels {
+		cm.Preset, cm.Model = strings.TrimSpace(cm.Preset), strings.TrimSpace(cm.Model)
+		if cm.Preset == "" || cm.Model == "" || seenCross[cm.Preset+"/"+cm.Model] {
+			continue
+		}
+		if _, err := e.providerForPreset(cm.Preset); err != nil {
+			return "", fmt.Errorf("跨平台预设 %s 不可用: %w", cm.Preset, err)
+		}
+		seenCross[cm.Preset+"/"+cm.Model] = true
+		cross = append(cross, cm)
 	}
 	// 按照片所属批次分组；不支持的格式（RAF/HEIC 等）与解码失败无法通过重试解决，直接跳过
 	type group struct {
@@ -1130,9 +1156,17 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 			continue
 		}
 		e.store.ResetPhoto(id)
-		if forceCost {
-			// 重置后清除指纹缓存条目，强制重调 API（同模型+版本）
+		if o.ForceCost {
+			// 重置后清除指纹缓存条目，强制重调 API（同模型+版本）；
+			// 所选的每个目标模型有旧缓存也一并清掉——重评语义=所选模型全部重新调用
 			e.store.CacheDelete(p.Fingerprint, p.Model, p.PromptVersion)
+			e.store.CacheDelete(p.Fingerprint, model, scorer.PromptVersion)
+			for _, m := range extras {
+				e.store.CacheDelete(p.Fingerprint, m, scorer.PromptVersion)
+			}
+			for _, cm := range cross {
+				e.store.CacheDelete(p.Fingerprint, cm.Preset+"/"+cm.Model, scorer.PromptVersion)
+			}
 		}
 		g := groups[p.SessionID]
 		if g == nil {
@@ -1149,17 +1183,35 @@ func (e *Engine) Rescore(ids []int64, forceCost bool) (string, error) {
 	if n == 0 {
 		return "", errors.New("没有可重评的照片（不存在、批次已删除或格式不支持）")
 	}
-	// 复检重评统一使用当前配置的默认模型（而非批次旧模型）
-	model := cfg.Model.Default
 	first := ""
 	for _, g := range groups {
-		e.enqueue(g.sessID, StartOpts{Dir: g.dir}, model)
+		e.enqueue(g.sessID, StartOpts{Dir: g.dir, Models: extras, CrossModels: cross}, model)
 		if first == "" {
 			first = g.sessID
 		}
 	}
-	logutil.Info("复检重评 %d 张入队（%d 个批次，强制重调=%v）", n, len(groups), forceCost)
+	total := 1 + len(extras) + len(cross)
+	logutil.Info("复检重评 %d 张入队（%d 个批次，强制重调=%v，模型 %d 个）", n, len(groups), o.ForceCost, total)
 	return first, nil
+}
+
+// pickMainAndExtras 同平台模型清单：去空去重保序，首个为主模型，其余为对比模型；
+// 空清单回退到默认模型（单模型）。
+func pickMainAndExtras(models []string, def string) (main string, extras []string) {
+	seen := map[string]bool{}
+	var list []string
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		list = append(list, m)
+	}
+	if len(list) == 0 {
+		return def, nil
+	}
+	return list[0], list[1:]
 }
 
 // RescoreAllFailed 一键重试当前会话全部失败照片（解析失败 + 调用失败）
@@ -1178,7 +1230,7 @@ func (e *Engine) RescoreAllFailed() (string, int, error) {
 	if len(ids) == 0 {
 		return "", 0, errors.New("没有可重试的失败照片")
 	}
-	sessID, err := e.Rescore(ids, true)
+	sessID, err := e.Rescore(ids, RescoreOpts{ForceCost: true})
 	if err != nil {
 		return "", 0, err
 	}

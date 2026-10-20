@@ -203,12 +203,45 @@
               <option v-if="state.currentModel && !state.models.vision.includes(state.currentModel)" :value="state.currentModel">{{ state.currentModel }}（当前）</option>
             </select>
           </label>
-          <div class="muted">忽略缓存强制重新调用 AI（产生 API 费用）；换新模型可对比不同 AI 的评分差异</div>
+          <label class="row" style="gap: 6px; align-items: center" title="勾选后可加选多个模型，同一张图并行重评（每个模型各写评分历史，合议平均分自动重算）">
+            <input type="checkbox" v-model="rescoreMulti" />
+            ⚖️ 多模型对比
+          </label>
+          <template v-if="rescoreMulti">
+            <label class="field">
+              对比模型（当前平台，Ctrl/Shift 多选）
+              <select v-model="rescoreExtraModels" multiple size="4" title="按住 Ctrl 点选多个">
+                <option v-for="m in state.models.vision.filter(x => x !== rescoreModel)" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </label>
+            <div class="field">
+              跨平台模型（其它平台的预设 + 模型，并行评同一张）
+              <div class="row" style="gap: 6px">
+                <select v-model="rescoreCrossPreset" style="flex: 1" @change="loadRescorePresetModels" title="平台预设（设置页可添加）">
+                  <option value="">选择平台…</option>
+                  <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+                </select>
+                <select v-model="rescoreCrossModel" style="flex: 1" :disabled="!rescorePresetModels.length">
+                  <option value="">{{ rescorePresetLoading ? '拉取中…' : '选择模型…' }}</option>
+                  <option v-for="m in rescorePresetModels" :key="m" :value="m">{{ m }}</option>
+                </select>
+                <button class="btn plain small" :disabled="!rescoreCrossPreset || !(rescoreCrossModel || rescoreCrossManual.trim())" @click="addRescoreCross">＋ 添加</button>
+              </div>
+              <input v-model="rescoreCrossManual" style="width: 100%; margin-top: 4px" placeholder="或手动输入模型 ID（部分平台无清单接口，如天翼）" @keyup.enter="addRescoreCross" />
+              <div v-if="rescoreCross.length" class="row" style="flex-wrap: wrap; gap: 6px; margin-top: 6px">
+                <span v-for="(c, i) in rescoreCross" :key="c.preset + '/' + c.model" class="tag" style="cursor: pointer"
+                  :title="c.preset + ' 平台的 ' + c.model + '（点击移除）'" @click="rescoreCross.splice(i, 1)">
+                  🌐 {{ c.preset }} / {{ c.model }} ×
+                </span>
+              </div>
+            </div>
+          </template>
+          <div class="muted">忽略缓存强制重新调用 AI（产生 API 费用）；多模型时每个模型各自重新调用并写入评分历史，照片正式分按合议平均自动重算。</div>
         </div>
         <div class="row" style="justify-content: flex-end; margin-top: 12px">
           <button class="btn plain" @click="rescoreAllOpen = false">取消</button>
           <button class="btn" :disabled="rescoring || !scopeCount(rescoreScope)" @click="doRescoreAll">
-            开始重评（{{ scopeCount(rescoreScope) }} 张）
+            开始重评（{{ scopeCount(rescoreScope) }} 张{{ rescoreMultiCount > 1 ? ` × ${rescoreMultiCount} 模型` : '' }}）
           </button>
         </div>
       </div>
@@ -498,10 +531,44 @@ function rescorable(p) {
 }
 const rescorableCount = computed(() => items.value.filter((p) => selected.value.has(p.id) && rescorable(p)).length)
 
-// ---------- 一键重评：范围 + 新模型 ----------
+// ---------- 一键重评：范围 + 新模型 + 多模型对比 ----------
 const rescoreAllOpen = ref(false)
 const rescoreScope = ref('filtered')
 const rescoreModel = ref('')
+const rescoreMulti = ref(false)
+const rescoreExtraModels = ref([])
+const rescoreCross = ref([])
+const rescoreCrossPreset = ref('')
+const rescoreCrossModel = ref('')
+const rescoreCrossManual = ref('')
+const rescorePresetModels = ref([])
+const rescorePresetLoading = ref(false)
+const presets = computed(() => (state.config && state.config.presets) || [])
+const rescoreMultiCount = computed(() =>
+  1 + (rescoreMulti.value ? rescoreExtraModels.value.length + rescoreCross.value.length : 0))
+async function loadRescorePresetModels() {
+  rescoreCrossModel.value = ''
+  rescorePresetModels.value = []
+  if (!rescoreCrossPreset.value) return
+  rescorePresetLoading.value = true
+  try {
+    const r = await api('/api/preset/models', { method: 'POST', body: JSON.stringify({ name: rescoreCrossPreset.value }) })
+    rescorePresetModels.value = r.vision || []
+    if (!rescorePresetModels.value.length) toast('该平台未返回可用模型清单，可直接输入模型 ID 添加')
+  } catch {
+    toast('该平台无模型清单接口（或拉取失败），可直接输入模型 ID 添加')
+  }
+  rescorePresetLoading.value = false
+}
+function addRescoreCross() {
+  const model = rescoreCrossManual.value.trim() || rescoreCrossModel.value
+  if (!rescoreCrossPreset.value || !model) return
+  if (!rescoreCross.value.some((c) => c.preset === rescoreCrossPreset.value && c.model === model)) {
+    rescoreCross.value.push({ preset: rescoreCrossPreset.value, model })
+  }
+  rescoreCrossModel.value = ''
+  rescoreCrossManual.value = ''
+}
 function rescopeTargets() {
   let list = filtered.value
   if (rescoreScope.value === 'noReason') list = items.value.filter((p) => p.status === 'scored' && !p.weakness)
@@ -532,9 +599,19 @@ async function doRescoreAll() {
     toast('所选范围内没有可重评的照片')
     return
   }
+  const body = { ids: targets.map((p) => p.id), force: true }
+  if (rescoreMulti.value) {
+    const models = [rescoreModel.value, ...rescoreExtraModels.value].filter((m, i, a) => m && a.indexOf(m) === i)
+    if (models.length + rescoreCross.value.length < 2) {
+      toast('多模型对比至少需要 2 个模型（同平台或跨平台均可）', true)
+      return
+    }
+    body.models = models
+    body.cross_models = rescoreCross.value.map((c) => ({ preset: c.preset, model: c.model }))
+  }
   rescoreAllOpen.value = false
-  state.selModel = rescoreModel.value // rescorePhotos 会把它应用为默认模型
-  await startRescore(targets)
+  state.selModel = rescoreModel.value // rescorePhotos 会把它应用为默认模型（主模型）
+  await startRescore(targets, body)
 }
 
 async function rescoreSelected() {
@@ -547,14 +624,14 @@ async function rescoreSelected() {
 }
 
 // 提交重评并监听进度（重评所选 / 一键重评共用）
-async function startRescore(targets) {
+async function startRescore(targets, body = null) {
   rescoring.value = true
   rescoreDone.value = 0
   rescoreFailed.value = 0
   rescoreTotal.value = targets.length
   pendingKeys = new Set(targets.map((p) => `${p.session_id}|${p.filename}`))
   try {
-    const r = await rescorePhotos({ ids: targets.map((p) => p.id), force: true })
+    const r = await rescorePhotos(body || { ids: targets.map((p) => p.id), force: true })
     markForced(r.session_id, targets.map((p) => p.filename))
   } catch (e) {
     toast(e.message, true)

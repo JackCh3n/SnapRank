@@ -803,12 +803,16 @@ func (s *Server) handleCleanCache(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{"freed_bytes": freed, "freed_mb": float64(freed) / 1048576})
 }
 
-// handleRescore 复检重评：单张/多张（force=true 忽略缓存）或全部待复检（all=true）
+// handleRescore 复检重评：单张/多张（force=true 忽略缓存）或全部待复检（all=true）；
+// 可选多模型对比（models 首个=主模型 + cross_models 跨平台），各模型并行重评各自写历史
 func (s *Server) handleRescore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs   []int64 `json:"ids"`
 		Force bool    `json:"force"`
 		All   bool    `json:"all"`
+		// 可选多模型对比：Models 首个为主模型，其余同平台并行；CrossModels 跨平台预设+模型
+		Models      []string              `json:"models"`
+		CrossModels []pipeline.CrossModel `json:"cross_models"`
 	}
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, 400, err)
@@ -823,7 +827,7 @@ func (s *Server) handleRescore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{"session_id": sessID, "count": n})
 		return
 	}
-	sessID, err := s.core.Rescore(req.IDs, req.Force)
+	sessID, err := s.core.Rescore(req.IDs, req.Force, req.Models, req.CrossModels)
 	if err != nil {
 		writeErr(w, 400, err)
 		return

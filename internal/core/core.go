@@ -258,9 +258,10 @@ func (c *Core) Recalculate(sessionID string) (int, error) { return c.Engine().Re
 // RescoreAllFailed 一键重试全部失败照片（解析失败 + 调用失败）
 func (c *Core) RescoreAllFailed() (string, int, error) { return c.Engine().RescoreAllFailed() }
 
-// Rescore 复检重评指定照片（force=true 忽略缓存强制重调 API）
-func (c *Core) Rescore(ids []int64, force bool) (string, error) {
-	return c.Engine().Rescore(ids, force)
+// Rescore 复检重评指定照片（force=true 忽略缓存强制重调 API；opts.Models/CrossModels
+// 可选多模型对比——首个为主模型，各模型并行评分各自写历史，合议平均分自动重算）
+func (c *Core) Rescore(ids []int64, force bool, models []string, cross []pipeline.CrossModel) (string, error) {
+	return c.Engine().Rescore(ids, pipeline.RescoreOpts{ForceCost: force, Models: models, CrossModels: cross})
 }
 
 // ---------- 明细 / 缩略图 / 调档 ----------
