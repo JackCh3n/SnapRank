@@ -168,7 +168,7 @@
         </div>
         <div class="muted" style="font-size: 12px; margin-top: 6px">
           分桶规则：6.0-6.5、6.6-7.0、7.1-7.5 各一个文件夹；7.6 起每 0.1 分一个文件夹（7.6、7.7…10.0）。
-          已归档过的照片自动跳过；同名冲突自动加序号；同名 RAW/HEIC 伴生文件（.raf/.cr2/.nef…）跟随主图一起移动/复制。
+          已归档过的照片自动跳过；同名不同内容自动按「名_分值 → 名_分值_哈希前3 → 名_分值_哈希后3」区分；同名 RAW/HEIC 伴生文件（.raf/.cr2/.nef…）跟随主图一起移动/复制。
         </div>
         <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 12px">
           <select v-model="scoreArchiveMode" style="width: 130px" title="移动=剪切源文件；复制=保留源文件">

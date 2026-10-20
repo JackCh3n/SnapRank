@@ -35,7 +35,6 @@ func Place(sessionDir, bucket, srcPath, fingerprint string, mode Mode) (dest str
 		return "", false, err
 	}
 	dest = filepath.Join(destDir, filepath.Base(srcPath))
-
 	if _, err := os.Stat(dest); err == nil {
 		same, ferr := sameContent(dest, fingerprint)
 		if ferr != nil {
@@ -46,24 +45,78 @@ func Place(sessionDir, bucket, srcPath, fingerprint string, mode Mode) (dest str
 		}
 		dest = uniqueName(destDir, srcPath)
 	}
+	if err := placeTo(srcPath, dest, mode); err != nil {
+		return "", false, err
+	}
+	return dest, false, nil
+}
 
+// PlaceScored 分值归档放置（同名不同内容时的区分命名）：
+// ①主名冲突 → ②「主名_分值.扩展」→ 仍冲突 → ③「主名_分值_哈希前3位.扩展」
+// → 仍冲突 → ④「主名_分值_哈希后3位.扩展」→ 极端情况退回「名 (2).ext」序号。
+// 每个候选名都先做内容比对：已存在且指纹相同视为已归档（跳过），只有内容
+// 确实不同才换下一个名字。分值归档只处理已评分照片，score 恒有效。
+func PlaceScored(sessionDir, bucket, srcPath, fingerprint string, score float64, mode Mode) (dest string, skipped bool, err error) {
+	destDir := filepath.Join(sessionDir, bucket)
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", false, err
+	}
+	base := filepath.Base(srcPath)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	scoreStr := strconv.FormatFloat(score, 'f', 1, 64)
+	head3, tail3 := fingerprint, fingerprint
+	if len(head3) > 3 {
+		head3 = head3[:3]
+		tail3 = tail3[len(tail3)-3:]
+	}
+	cands := []string{
+		base,
+		stem + "_" + scoreStr + ext,
+		stem + "_" + scoreStr + "_" + head3 + ext,
+		stem + "_" + scoreStr + "_" + tail3 + ext,
+	}
+	for _, name := range cands {
+		dest = filepath.Join(destDir, name)
+		if _, err := os.Stat(dest); err == nil {
+			same, ferr := sameContent(dest, fingerprint)
+			if ferr != nil {
+				return "", false, ferr
+			}
+			if same {
+				return dest, true, nil // 同一份内容已归档过
+			}
+			continue // 同名不同内容：换下一个候选名
+		}
+		if err := placeTo(srcPath, dest, mode); err != nil {
+			return "", false, err
+		}
+		return dest, false, nil
+	}
+	dest = uniqueName(destDir, srcPath) // 前3/后3 都撞上（概率极低）：退回序号
+	if err := placeTo(srcPath, dest, mode); err != nil {
+		return "", false, err
+	}
+	return dest, false, nil
+}
+
+// placeTo 把源文件落到目标路径：移动（跨卷/占用回退复制+删除）或复制。
+func placeTo(srcPath, dest string, mode Mode) error {
 	switch mode {
 	case Move:
 		if err := os.Rename(srcPath, dest); err != nil {
 			// 跨卷/权限问题回退 copy+delete
 			if cerr := copyFile(srcPath, dest); cerr != nil {
-				return "", false, fmt.Errorf("移动失败: %w", err)
+				return fmt.Errorf("移动失败: %w", err)
 			}
 			if rerr := os.Remove(srcPath); rerr != nil {
-				return dest, false, fmt.Errorf("复制成功但删除源文件失败: %w", rerr)
+				return fmt.Errorf("复制成功但删除源文件失败: %w", rerr)
 			}
 		}
 	default:
-		if err := copyFile(srcPath, dest); err != nil {
-			return "", false, err
-		}
+		return copyFile(srcPath, dest)
 	}
-	return dest, false, nil
+	return nil
 }
 
 // RawSiblingExts 同名伴生文件扩展名（RAW/HEIC 等）：删除/归档/还原时联动处理

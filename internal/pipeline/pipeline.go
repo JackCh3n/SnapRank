@@ -2178,7 +2178,7 @@ func (e *Engine) ScoreArchive(ids []int64, mode archive.Mode, destDir string) (*
 			continue
 		}
 		bucket := ScoreBucket(p.Score)
-		dest, skipped, perr := archive.Place(root, bucket, p.SrcPath, p.Fingerprint, mode)
+		dest, skipped, perr := archive.PlaceScored(root, bucket, p.SrcPath, p.Fingerprint, p.Score, mode)
 		if perr != nil {
 			sum.Failed++
 			sum.Errors = append(sum.Errors, fmt.Sprintf("%s: %v", p.Filename, perr))
